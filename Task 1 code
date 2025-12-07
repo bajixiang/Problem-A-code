@@ -1,0 +1,1522 @@
+import pandas as pd
+import numpy as np
+import os
+import warnings
+from pathlib import Path
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import StandardScaler
+
+warnings.filterwarnings('ignore')
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
+plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
+
+# ============================================================================
+# 1. 数据加载器
+# ============================================================================
+
+class StockDataLoader:
+    """
+    股票数据加载器 - 支持递归读取CSV文件
+    """
+    
+    def __init__(self, data_path):
+        self.data_path = Path(data_path)
+        self.stock_files = []
+        self.all_data = {}
+        self.market_data = None
+    
+    def load_all_stocks(self):
+        """
+        加载所有股票数据
+        """
+        print("=" * 60)
+        print("开始加载股票数据...")
+        print(f"数据目录: {self.data_path}")
+        
+        # 递归查找所有CSV文件
+        self.stock_files = list(self.data_path.rglob("*.csv"))
+        print(f"找到 {len(self.stock_files)} 个股票文件")
+        
+        if len(self.stock_files) == 0:
+            print("警告: 没有找到任何CSV文件!")
+            return self.all_data
+        
+        # 逐个读取文件
+        for file_path in self.stock_files:
+            try:
+                # 提取股票代码
+                stock_code = file_path.stem
+                
+                # 显示加载进度
+                relative_path = file_path.relative_to(self.data_path)
+                print(f"  加载: {relative_path} -> {stock_code}")
+                
+                # 读取CSV文件
+                df = pd.read_csv(file_path)
+                
+                # 标准化列名
+                df = self._standardize_columns(df)
+                
+                # 确保有必要的列
+                required_cols = ['day', 'close']
+                missing_cols = [col for col in required_cols if col not in df.columns]
+                
+                if missing_cols:
+                    print(f"    警告: 缺少必要列 {missing_cols}")
+                    continue
+                
+                # 转换日期格式
+                df['day'] = pd.to_datetime(df['day'])
+                
+                # 按日期排序
+                df = df.sort_values('day').reset_index(drop=True)
+                
+                # 计算日收益率
+                df['return'] = df['close'].pct_change()
+                
+                # 存储数据
+                self.all_data[stock_code] = df
+                
+                print(f"    成功加载，数据行数: {len(df)}")
+                
+                # 检查是否为市场指数数据
+                if 'market' in df.columns or '指数' in str(file_path):
+                    self.market_data = df.copy()
+                    print(f"    识别为市场指数数据")
+                    
+            except Exception as e:
+                print(f"  读取 {file_path} 时出错: {str(e)[:100]}...")
+        
+        print(f"\\n数据加载完成！共加载 {len(self.all_data)} 只股票")
+        
+        # 显示加载的股票代码
+        if self.all_data:
+            print("\\n加载的股票代码:")
+            stock_codes = list(self.all_data.keys())
+            for i in range(0, min(len(stock_codes), 50), 10):
+                print("  " + ", ".join(stock_codes[i:i+10]))
+            if len(stock_codes) > 50:
+                print(f"  ... 还有 {len(stock_codes)-50} 只股票")
+        
+        return self.all_data
+    
+    def _standardize_columns(self, df):
+        """
+        标准化列名
+        """
+        column_mapping = {}
+        
+        for col in df.columns:
+            try:
+                col_str = str(col)
+                col_lower = col_str.strip().lower()
+                
+                # 日期相关
+                if col_lower in ['day', 'date', '交易日', 'trade_date']:
+                    column_mapping[col] = 'day'
+                
+                # 代码相关
+                elif col_lower in ['code', '股票代码', 'stock_code', 'ts_code']:
+                    column_mapping[col] = 'code'
+                
+                # 价格相关
+                elif col_lower in ['open', '开盘价', '开盘']:
+                    column_mapping[col] = 'open'
+                elif col_lower in ['close', '收盘价', '收盘']:
+                    column_mapping[col] = 'close'
+                elif col_lower in ['high', '最高价', '最高']:
+                    column_mapping[col] = 'high'
+                elif col_lower in ['low', '最低价', '最低']:
+                    column_mapping[col] = 'low'
+                
+                # 成交量相关
+                elif col_lower in ['volume', '成交量', 'vol']:
+                    column_mapping[col] = 'volume'
+                elif col_lower in ['amount', '成交额', 'turnover']:
+                    column_mapping[col] = 'amount'
+                
+                # 技术指标相关
+                elif col_lower in ['zf', '振幅', 'amplitude']:
+                    column_mapping[col] = 'zf'
+                elif col_lower in ['zdf', '涨跌幅', 'change_pct', 'pct_chg']:
+                    column_mapping[col] = 'zdf'
+                elif col_lower in ['zde', '涨跌额', 'change']:
+                    column_mapping[col] = 'zde'
+                elif col_lower in ['hsl', 'hs1', '换手率', 'turnover_rate']:
+                    column_mapping[col] = 'hsl'
+                
+                # 市场指数
+                elif col_lower in ['market', '市场指数', '大盘', 'index']:
+                    column_mapping[col] = 'market'
+                    
+            except Exception as e:
+                # 如果列名处理失败，保持原样
+                print(f"    警告: 处理列名 {col} 时出错: {e}")
+        
+        # 应用列名映射
+        df = df.rename(columns=column_mapping)
+        
+        # 确保收盘价是数值类型
+        if 'close' in df.columns:
+            df['close'] = pd.to_numeric(df['close'], errors='coerce')
+        
+        return df
+    def get_market_data(self):
+        """
+        获取市场指数数据
+        """
+        if self.market_data is not None:
+            return self.market_data
+        
+        # 如果没有明确的市场数据，尝试寻找
+        for stock_code, df in self.all_data.items():
+            if 'market' in df.columns:
+                self.market_data = df[['day', 'market']].copy()
+                self.market_data = self.market_data.rename(columns={'market': 'close'})
+                print(f"使用 {stock_code} 中的市场数据")
+                break
+        
+        return self.market_data
+    
+    def get_stock_count_by_folder(self):
+        """
+        按文件夹统计股票数量
+        """
+        if not self.stock_files:
+            print("没有找到股票文件")
+            return {}
+        
+        folder_counts = {}
+        for file_path in self.stock_files:
+            folder_name = file_path.parent.name
+            folder_counts[folder_name] = folder_counts.get(folder_name, 0) + 1
+        
+        print("\\n各文件夹股票数量统计:")
+        for folder, count in sorted(folder_counts.items()):
+            print(f"  {folder}: {count} 个文件")
+        
+        total = sum(folder_counts.values())
+        print(f"  总计: {total} 个文件")
+        
+        return folder_counts
+
+# ============================================================================
+# 2. 量化特征库（4+2维度）
+# ============================================================================
+
+class QuantitativeFeatureLibrary:
+    """
+    量化特征库 - 实现4+2维度的特征工程
+    4类特征：趋势类、动量类、成交量类、波动率类
+    2类增强特征：相对强度、时间维度（周/月）
+    """
+    
+    def __init__(self):
+        """初始化特征库"""
+        self.feature_categories = {
+            'trend': [],      # 趋势类特征
+            'momentum': [],   # 动量类特征
+            'volume': [],     # 成交量类特征
+            'volatility': [], # 波动率类特征
+            'relative': [],   # 相对强度特征
+            'time': []        # 时间维度特征
+        }
+        
+        # 特征计算配置
+        self.config = {
+            'trend': {
+                'ma_windows': [5, 20, 60],  # 移动平均窗口
+                'ema_spans': [12, 26],      # 指数移动平均跨度
+                'bb_window': 20,            # 布林带窗口
+                'bb_std': 2                 # 布林带标准差倍数
+            },
+            'momentum': {
+                'rsi_window': 14,           # RSI窗口
+                'kdj_window': 9,            # KDJ窗口
+                'williams_window': 14,      # 威廉指标窗口
+                'cci_window': 20            # CCI窗口
+            },
+            'volume': {
+                'volume_ma_windows': [5, 10, 20],  # 成交量移动平均窗口
+                'obv_window': 20,                   # OBV移动平均窗口
+                'mfi_window': 14                    # MFI窗口
+            },
+            'volatility': {
+                'atr_window': 14,           # ATR窗口
+                'hist_vol_window': 20       # 历史波动率窗口
+            },
+            'relative': {
+                'beta_window': 20,          # Beta计算窗口
+                'rs_window': 14             # 相对强弱窗口
+            }
+        }
+    
+    def calculate_all_features(self, stock_df, market_df=None):
+        """
+        计算所有4+2维度的特征
+        
+        参数:
+        stock_df: 个股日线数据 (DataFrame)
+        market_df: 市场指数数据 (DataFrame, 可选)
+        
+        返回:
+        包含所有特征的DataFrame
+        """
+        print("开始计算4+2维度特征库...")
+        
+        # 检查个股数据
+        if stock_df.empty:
+            print("  警告: 个股数据为空")
+            return stock_df
+        
+        # 检查是否有必要的数据列
+        required_cols = ['day', 'open', 'high', 'low', 'close', 'volume']
+        missing_cols = [col for col in required_cols if col not in stock_df.columns]
+        if missing_cols:
+            print(f"  警告: 缺少必要列 {missing_cols}")
+            # 创建缺失的列并填充NaN
+            for col in missing_cols:
+                stock_df[col] = np.nan
+        
+        # 复制数据避免修改原始数据
+        df = stock_df.copy()
+        
+        # 1. 计算趋势类特征
+        print("  [1/6] 计算趋势类特征...")
+        df = self._calculate_trend_features(df)
+        
+        # 2. 计算动量类特征
+        print("  [2/6] 计算动量类特征...")
+        df = self._calculate_momentum_features(df)
+        
+        # 3. 计算成交量类特征
+        print("  [3/6] 计算成交量类特征...")
+        df = self._calculate_volume_features(df)
+        
+        # 4. 计算波动率类特征
+        print("  [4/6] 计算波动率类特征...")
+        df = self._calculate_volatility_features(df)
+        
+        # 5. 计算相对强度特征
+        if market_df is not None and not market_df.empty:
+            print("  [5/6] 计算相对强度特征...")
+            df = self._calculate_relative_features(df, market_df)
+        else:
+            print("  [5/6] 跳过相对强度特征（无市场数据）")
+        
+        # 6. 计算时间维度特征
+        print("  [6/6] 计算时间维度特征...")
+        df = self._calculate_time_features(df)
+        
+        # 收集特征名称
+        self._collect_feature_names(df)
+        
+        print("特征计算完成!")
+        
+        return df
+    def _calculate_trend_features(self, df):
+        """
+        计算趋势类特征
+        """
+        # 简单移动平均线
+        for window in self.config['trend']['ma_windows']:
+            df[f'ma{window}'] = df['close'].rolling(window=window, min_periods=1).mean()
+        
+        # 指数移动平均线
+        for span in self.config['trend']['ema_spans']:
+            df[f'ema{span}'] = df['close'].ewm(span=span, adjust=False).mean()
+        
+        # 布林带
+        bb_window = self.config['trend']['bb_window']
+        bb_std = self.config['trend']['bb_std']
+        
+        df['bb_middle'] = df['close'].rolling(window=bb_window, min_periods=1).mean()
+        bb_std_series = df['close'].rolling(window=bb_window, min_periods=1).std()
+        df['bb_upper'] = df['bb_middle'] + bb_std * bb_std_series
+        df['bb_lower'] = df['bb_middle'] - bb_std * bb_std_series
+        
+        # 布林带衍生指标
+        df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
+        df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'] + 1e-8)
+        
+        # 移动平均线交叉信号
+        df['ma5_cross_ma20'] = ((df['ma5'] > df['ma20']) & (df['ma5'].shift(1) <= df['ma20'].shift(1))).astype(int)
+        df['ma20_cross_ma60'] = ((df['ma20'] > df['ma60']) & (df['ma20'].shift(1) <= df['ma60'].shift(1))).astype(int)
+        
+        # 价格相对于移动平均线的位置
+        for window in self.config['trend']['ma_windows']:
+            df[f'price_vs_ma{window}'] = (df['close'] - df[f'ma{window}']) / (df[f'ma{window}'] + 1e-8)
+        
+        # 趋势强度指标
+        df['trend_strength'] = (df['ma5'] - df['ma20']) / (df['ma20'] + 1e-8)
+        df['trend_direction'] = np.sign(df['trend_strength'])
+        
+        return df
+    
+    def _calculate_momentum_features(self, df):
+        """
+        计算动量类特征
+        """
+        # MACD指标
+        df['macd_dif'] = df['ema12'] - df['ema26']
+        df['macd_dea'] = df['macd_dif'].ewm(span=9, adjust=False).mean()
+        df['macd'] = (df['macd_dif'] - df['macd_dea']) * 2
+        
+        # MACD信号
+        df['macd_golden_cross'] = ((df['macd_dif'] > df['macd_dea']) & 
+                                  (df['macd_dif'].shift(1) <= df['macd_dea'].shift(1))).astype(int)
+        df['macd_dead_cross'] = ((df['macd_dif'] < df['macd_dea']) & 
+                                (df['macd_dif'].shift(1) >= df['macd_dea'].shift(1))).astype(int)
+        
+        # RSI指标
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=self.config['momentum']['rsi_window']).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=self.config['momentum']['rsi_window']).mean()
+        rs = gain / (loss + 1e-8)
+        df['rsi'] = 100 - (100 / (1 + rs))
+        
+        # RSI信号
+        df['rsi_overbought'] = (df['rsi'] > 70).astype(int)
+        df['rsi_oversold'] = (df['rsi'] < 30).astype(int)
+        df['rsi_signal'] = df['rsi'] - 50  # 中心化
+        
+        # KDJ指标
+        low_min = df['low'].rolling(window=self.config['momentum']['kdj_window']).min()
+        high_max = df['high'].rolling(window=self.config['momentum']['kdj_window']).max()
+        
+        rsv = 100 * ((df['close'] - low_min) / (high_max - low_min + 1e-8))
+        df['kdj_k'] = rsv.ewm(com=2).mean()
+        df['kdj_d'] = df['kdj_k'].ewm(com=2).mean()
+        df['kdj_j'] = 3 * df['kdj_k'] - 2 * df['kdj_d']
+        
+        # KDJ信号
+        df['kdj_golden_cross'] = ((df['kdj_k'] > df['kdj_d']) & 
+                                 (df['kdj_k'].shift(1) <= df['kdj_d'].shift(1))).astype(int)
+        
+        # 威廉指标
+        period = self.config['momentum']['williams_window']
+        highest_high = df['high'].rolling(window=period).max()
+        lowest_low = df['low'].rolling(window=period).min()
+        df['williams_r'] = -100 * ((highest_high - df['close']) / (highest_high - lowest_low + 1e-8))
+        
+        # 威廉指标信号
+        df['williams_overbought'] = (df['williams_r'] > -20).astype(int)
+        df['williams_oversold'] = (df['williams_r'] < -80).astype(int)
+        
+        # CCI指标
+        tp = (df['high'] + df['low'] + df['close']) / 3
+        sma_tp = tp.rolling(window=self.config['momentum']['cci_window']).mean()
+        mad = (tp - sma_tp).abs().rolling(window=self.config['momentum']['cci_window']).mean()
+        
+        df['cci'] = (tp - sma_tp) / (0.015 * mad + 1e-8)
+        
+        # CCI信号
+        df['cci_overbought'] = (df['cci'] > 100).astype(int)
+        df['cci_oversold'] = (df['cci'] < -100).astype(int)
+        
+        # 动量指标汇总
+        df['momentum_score'] = (df['rsi_signal'] / 50 + 
+                               df['macd_dif'] / (df['close'].rolling(20).std() + 1e-8) + 
+                               df['kdj_k'] / 100) / 3
+        
+        return df
+    def _calculate_volume_features(self, df):
+        """
+        计算成交量类特征
+        """
+        # 成交量移动平均
+        for window in self.config['volume']['volume_ma_windows']:
+            df[f'volume_ma{window}'] = df['volume'].rolling(window=window, min_periods=1).mean()
+        
+        # 成交量比率
+        for window in self.config['volume']['volume_ma_windows']:
+            df[f'volume_ratio_{window}'] = df['volume'] / (df[f'volume_ma{window}'] + 1e-8)
+        
+        # 成交量突增信号
+        df['volume_surge'] = (df['volume_ratio_5'] > 2).astype(int)
+        df['volume_shrink'] = (df['volume_ratio_5'] < 0.5).astype(int)
+        
+        # OBV能量潮
+        obv = [0]
+        for i in range(1, len(df)):
+            if df['close'].iloc[i] > df['close'].iloc[i-1]:
+                obv.append(obv[-1] + df['volume'].iloc[i])
+            elif df['close'].iloc[i] < df['close'].iloc[i-1]:
+                obv.append(obv[-1] - df['volume'].iloc[i])
+            else:
+                obv.append(obv[-1])
+        
+        df['obv'] = obv
+        df['obv_ma'] = df['obv'].rolling(window=self.config['volume']['obv_window'], min_periods=1).mean()
+        df['obv_signal'] = (df['obv'] > df['obv_ma']).astype(int)
+        
+        # 量价关系
+        df['price_up_volume_up'] = ((df['close'] > df['close'].shift(1)) & 
+                                   (df['volume'] > df['volume_ma5'])).astype(int)
+        df['price_down_volume_up'] = ((df['close'] < df['close'].shift(1)) & 
+                                     (df['volume'] > df['volume_ma5'])).astype(int)
+        
+        # 资金流量指标MFI
+        typical_price = (df['high'] + df['low'] + df['close']) / 3
+        money_flow = typical_price * df['volume']
+        
+        positive_mf = pd.Series(0, index=df.index)
+        negative_mf = pd.Series(0, index=df.index)
+        
+        for i in range(1, len(df)):
+            if typical_price.iloc[i] > typical_price.iloc[i-1]:
+                positive_mf.iloc[i] = money_flow.iloc[i]
+            elif typical_price.iloc[i] < typical_price.iloc[i-1]:
+                negative_mf.iloc[i] = money_flow.iloc[i]
+        
+        positive_flow = positive_mf.rolling(window=self.config['volume']['mfi_window']).sum()
+        negative_flow = negative_mf.rolling(window=self.config['volume']['mfi_window']).sum()
+        
+        money_ratio = positive_flow / (negative_flow + 1e-8)
+        df['mfi'] = 100 - (100 / (1 + money_ratio))
+        
+        # MFI信号
+        df['mfi_overbought'] = (df['mfi'] > 80).astype(int)
+        df['mfi_oversold'] = (df['mfi'] < 20).astype(int)
+        
+        # 量价背离
+        price_change = df['close'].pct_change(5)
+        volume_change = df['volume'].pct_change(5)
+        df['price_volume_divergence'] = price_change - volume_change
+        
+        return df
+    def _calculate_volatility_features(self, df):
+        """
+        计算波动率类特征 - 修复：增强错误处理
+        """
+        # ATR平均真实波幅
+        high_low = df['high'] - df['low']
+        high_close_prev = abs(df['high'] - df['close'].shift(1))
+        low_close_prev = abs(df['low'] - df['close'].shift(1))
+        
+        true_range = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
+        df['atr'] = true_range.rolling(window=self.config['volatility']['atr_window'], min_periods=1).mean()
+        df['atr_pct'] = df['atr'] / (df['close'] + 1e-8)
+        
+        # 历史波动率 - 修复：添加更严格的错误处理
+        try:
+            # 确保收盘价有效
+            if 'close' not in df.columns or df['close'].isna().all():
+                print("    警告: 收盘价数据无效，跳过历史波动率计算")
+                df['hist_volatility'] = np.nan
+            else:
+                # 计算对数收益率
+                log_returns = np.log(df['close'] / df['close'].shift(1))
+                # 计算历史波动率（年化）
+                df['hist_volatility'] = log_returns.rolling(
+                    window=self.config['volatility']['hist_vol_window'], 
+                    min_periods=1
+                ).std() * np.sqrt(252)
+                
+                # 如果计算结果全是NaN，填充为0
+                if df['hist_volatility'].isna().all():
+                    df['hist_volatility'] = 0
+        except Exception as e:
+            print(f"    警告: 计算历史波动率时出错: {e}")
+            df['hist_volatility'] = np.nan
+        
+        # 价格范围波动率
+        df['daily_range'] = (df['high'] - df['low']) / (df['close'] + 1e-8)
+        df['avg_daily_range'] = df['daily_range'].rolling(window=20, min_periods=1).mean()
+        
+        # 布林带波动率 - 检查布林带列是否存在
+        if 'bb_upper' in df.columns and 'bb_lower' in df.columns and 'bb_middle' in df.columns:
+            df['bb_volatility'] = (df['bb_upper'] - df['bb_lower']) / (df['bb_middle'] + 1e-8)
+        else:
+            df['bb_volatility'] = np.nan
+        
+        # 波动率比率 - 检查hist_volatility是否存在
+        if 'hist_volatility' in df.columns and not df['hist_volatility'].isna().all():
+            df['volatility_ratio'] = df['hist_volatility'] / df['hist_volatility'].rolling(window=60, min_periods=1).mean()
+        else:
+            df['volatility_ratio'] = np.nan
+        
+        # 波动率突破信号
+        df['volatility_breakout'] = (df['daily_range'] > df['avg_daily_range'] * 1.5).astype(int)
+        
+        # 波动率状态 - 修复：更健壮的分箱逻辑
+        try:
+            # 检查hist_volatility是否有有效数据
+            if 'hist_volatility' in df.columns and df['hist_volatility'].notna().sum() > 4:
+                # 获取有效数据
+                valid_data = df['hist_volatility'].dropna()
+                
+                # 尝试分箱
+                try:
+                    df['volatility_regime_num'] = pd.qcut(df['hist_volatility'], q=4, labels=False, duplicates='drop')
+                except ValueError:
+                    # 如果分箱失败，使用简单阈值法
+                    p25 = valid_data.quantile(0.25)
+                    p50 = valid_data.quantile(0.50)
+                    p75 = valid_data.quantile(0.75)
+                    
+                    conditions = [
+                        df['hist_volatility'] <= p25,
+                        (df['hist_volatility'] > p25) & (df['hist_volatility'] <= p50),
+                        (df['hist_volatility'] > p50) & (df['hist_volatility'] <= p75),
+                        df['hist_volatility'] > p75
+                    ]
+                    choices = [0, 1, 2, 3]
+                    df['volatility_regime_num'] = np.select(conditions, choices, default=-1)
+            else:
+                # 数据不足，设置为未知
+                df['volatility_regime_num'] = -1
+        except Exception as e:
+            print(f"    警告: 计算波动率状态时出错: {e}")
+            df['volatility_regime_num'] = -1
+        
+        # 创建字符串标签（仅用于可视化，不用于标准化）
+        regime_labels = {0: '低', 1: '中低', 2: '中高', 3: '高', -1: '未知'}
+        df['volatility_regime_label'] = df['volatility_regime_num'].map(regime_labels).fillna('未知')
+        
+        return df
+    
+    def _calculate_relative_features(self, df, market_df):
+        """
+        计算相对强度特征
+        """
+        # 确保日期格式一致
+        df['date'] = pd.to_datetime(df['day'])
+        market_df['date'] = pd.to_datetime(market_df['day'])
+        
+        # 合并数据
+        merged = pd.merge(df, market_df[['date', 'close']], on='date', how='left', suffixes=('_stock', '_market'))
+        merged = merged.rename(columns={'close_stock': 'close', 'close_market': 'market_close'})
+        
+        # 计算收益率
+        merged['stock_return'] = merged['close'].pct_change()
+        merged['market_return'] = merged['market_close'].pct_change()
+        
+        # 相对收益率
+        merged['relative_return'] = merged['stock_return'] - merged['market_return']
+        
+        # 相对强度 (RS)
+        merged['stock_cum_return'] = (1 + merged['stock_return'].fillna(0)).cumprod()
+        merged['market_cum_return'] = (1 + merged['market_return'].fillna(0)).cumprod()
+        merged['rs'] = merged['stock_cum_return'] / (merged['market_cum_return'] + 1e-8)
+        
+        # RS变化率
+        merged['rs_change'] = merged['rs'].pct_change()
+        
+        # 相对强弱指标 (类似RSI)
+        excess_return = merged['relative_return']
+        positive_excess = excess_return.where(excess_return > 0, 0)
+        negative_excess = abs(excess_return.where(excess_return < 0, 0))
+        
+        avg_gain = positive_excess.rolling(window=self.config['relative']['rs_window']).mean()
+        avg_loss = negative_excess.rolling(window=self.config['relative']['rs_window']).mean()
+        
+        rs_ratio = avg_gain / (avg_loss + 1e-8)
+        merged['rs_rsi'] = 100 - (100 / (1 + rs_ratio))
+        
+        # 相对突破信号
+        merged['relative_breakout'] = ((merged['stock_return'] > merged['market_return'] * 1.5) & 
+                                      (merged['stock_return'] > 0)).astype(int)
+        
+        # Beta系数
+        window = self.config['relative']['beta_window']
+        beta_values = []
+        
+        for i in range(len(merged)):
+            if i < window:
+                beta_values.append(np.nan)
+            else:
+                stock_returns = merged['stock_return'].iloc[i-window:i].values
+                market_returns = merged['market_return'].iloc[i-window:i].values
+                
+                if len(stock_returns) > 1 and len(market_returns) > 1:
+                    covariance = np.cov(stock_returns, market_returns)[0, 1]
+                    market_variance = np.var(market_returns)
+                    beta = covariance / (market_variance + 1e-8)
+                else:
+                    beta = np.nan
+                
+                beta_values.append(beta)
+        
+        # 填充缺失值
+        beta_series = pd.Series(beta_values, index=merged.index)
+        merged['beta'] = beta_series.fillna(method='ffill').fillna(1.0)
+        
+        # Alpha系数 (简化版)
+        merged['alpha'] = merged['stock_return'] - merged['beta'] * merged['market_return']
+        
+        # 相对强度评分
+        merged['relative_score'] = (merged['rs_rsi'] / 100 + 
+                                   merged['relative_return'].rolling(5).mean() * 10 + 
+                                   (merged['rs'] - 1)) / 3
+        
+        # 移除临时列
+        merged = merged.drop(columns=['date', 'stock_cum_return', 'market_cum_return'])
+        
+        # 合并回原始数据
+        result_df = df.copy()
+        for col in ['relative_return', 'rs', 'rs_change', 'rs_rsi', 'relative_breakout', 'beta', 'alpha', 'relative_score']:
+            if col in merged.columns:
+                result_df[col] = merged[col].values
+        
+        return result_df
+
+    def _calculate_time_features(self, df):
+        """
+        计算时间维度特征
+        """
+        # 确保有日期列
+        if 'day' not in df.columns:
+            return df
+        
+        # 设置日期索引
+        df_date = df.copy()
+        df_date['date'] = pd.to_datetime(df_date['day'])
+        df_date.set_index('date', inplace=True)
+        
+        # 周度特征
+        weekly_df = df_date.resample('W').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        })
+        
+        weekly_df['weekly_return'] = weekly_df['close'].pct_change()
+        weekly_df['weekly_volume_mean'] = weekly_df['volume'].rolling(window=4).mean()
+        
+        # 将周度特征合并到日度数据 - 修复：避免使用分类索引
+        # 创建周结束日期作为字符串，而不是日期对象
+        weekly_df['week_end_str'] = weekly_df.index.strftime('%Y-%m-%d')
+        weekly_dict_return = weekly_df.set_index('week_end_str')['weekly_return'].to_dict()
+        weekly_dict_volume = weekly_df.set_index('week_end_str')['weekly_volume_mean'].to_dict()
+        
+        # 为日度数据创建周结束日期字符串
+        df_date['week_end_str'] = (df_date.index + pd.offsets.Week(weekday=6)).strftime('%Y-%m-%d')
+        df_date['weekly_return'] = df_date['week_end_str'].map(weekly_dict_return)
+        df_date['weekly_volume_mean'] = df_date['week_end_str'].map(weekly_dict_volume)
+        
+        # 月度特征
+        monthly_df = df_date.resample('M').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        })
+        
+        monthly_df['monthly_return'] = monthly_df['close'].pct_change()
+        monthly_df['monthly_volume_mean'] = monthly_df['volume'].rolling(window=3).mean()
+        
+        # 将月度特征合并到日度数据 - 同样修复
+        monthly_df['month_end_str'] = monthly_df.index.strftime('%Y-%m-%d')
+        monthly_dict_return = monthly_df.set_index('month_end_str')['monthly_return'].to_dict()
+        monthly_dict_volume = monthly_df.set_index('month_end_str')['monthly_volume_mean'].to_dict()
+        
+        df_date['month_end_str'] = (df_date.index + pd.offsets.MonthEnd(0)).strftime('%Y-%m-%d')
+        df_date['monthly_return'] = df_date['month_end_str'].map(monthly_dict_return)
+        df_date['monthly_volume_mean'] = df_date['month_end_str'].map(monthly_dict_volume)
+        
+        # 季节性特征 - 修复：确保是数值或字符串类型
+        df_date['month'] = df_date.index.month.astype(int)
+        df_date['quarter'] = df_date.index.quarter.astype(int)
+        df_date['day_of_week'] = df_date.index.dayofweek.astype(int)  # 0=周一, 6=周日
+        df_date['day_of_month'] = df_date.index.day.astype(int)
+        df_date['is_month_start'] = df_date.index.is_month_start.astype(int)
+        df_date['is_month_end'] = df_date.index.is_month_end.astype(int)
+        df_date['is_quarter_start'] = df_date.index.is_quarter_start.astype(int)
+        df_date['is_quarter_end'] = df_date.index.is_quarter_end.astype(int)
+        
+        # 月初/月末效应
+        df_date['early_month'] = (df_date['day_of_month'] <= 10).astype(int)
+        df_date['mid_month'] = ((df_date['day_of_month'] >= 11) & (df_date['day_of_month'] <= 20)).astype(int)
+        df_date['late_month'] = (df_date['day_of_month'] >= 21).astype(int)
+        
+        # 星期效应
+        df_date['is_monday'] = (df_date['day_of_week'] == 0).astype(int)
+        df_date['is_friday'] = (df_date['day_of_week'] == 4).astype(int)
+        
+        # 重置索引
+        result_df = df_date.reset_index(drop=True)
+        
+        # 移除临时列
+        temp_cols = ['week_end_str', 'month_end_str']
+        for col in temp_cols:
+            if col in result_df.columns:
+                result_df = result_df.drop(columns=[col])
+        
+        return result_df
+    
+    def _collect_feature_names(self, df):
+        """
+        收集特征名称并分类
+        """
+        # 原始数据列
+        base_columns = ['day', 'code', 'open', 'high', 'low', 'close', 'volume', 
+                       'amount', 'zf', 'zdf', 'zde', 'hsl', 'return', 'market']
+        
+        # 获取所有特征列 - 修复：排除非字符串列名
+        all_columns = []
+        for col in df.columns:
+            try:
+                # 尝试转换为字符串
+                str_col = str(col)
+                all_columns.append(str_col)
+            except:
+                # 如果转换失败，跳过
+                continue
+        
+        feature_columns = [col for col in all_columns if col not in base_columns]
+        
+        # 按类别分类特征
+        category_patterns = {
+            'trend': ['ma', 'ema', 'bb', 'price_vs', 'trend_'],
+            'momentum': ['macd', 'rsi', 'kdj', 'williams', 'cci', 'momentum_'],
+            'volume': ['volume_', 'obv', 'mfi', 'price_up_volume', 'price_down_volume'],
+            'volatility': ['atr', 'volatility', 'daily_range', 'bb_volatility', 'volatility_'],
+            'relative': ['relative_', 'rs', 'beta', 'alpha'],
+            'time': ['weekly_', 'monthly_', 'month', 'quarter', 'day_of_', 'is_', 'early_', 'mid_', 'late_']
+        }
+        
+        # 重置特征类别
+        for category in self.feature_categories:
+            self.feature_categories[category] = []
+        
+        # 分类特征
+        for feature in feature_columns:
+            try:
+                feature_lower = str(feature).lower()
+                categorized = False
+                
+                for category, patterns in category_patterns.items():
+                    if any(pattern in feature_lower for pattern in patterns):
+                        self.feature_categories[category].append(feature)
+                        categorized = True
+                        break
+                
+                # 如果未分类，放入"其他"
+                if not categorized and feature not in base_columns:
+                    if 'other' not in self.feature_categories:
+                        self.feature_categories['other'] = []
+                    self.feature_categories['other'].append(feature)
+            except Exception as e:
+                # 如果分类失败，跳过
+                continue
+    def get_feature_summary(self):
+        """
+        获取特征摘要
+        """
+        summary = {
+            'total_features': 0,
+            'by_category': {}
+        }
+        
+        for category, features in self.feature_categories.items():
+            count = len(features)
+            summary['total_features'] += count
+            summary['by_category'][category] = {
+                'count': count,
+                'features': features[:10]  # 只显示前10个
+            }
+        
+        return summary
+    
+    def standardize_features(self, df, feature_columns=None):
+        """
+        标准化特征值 - 修复：只对数值型特征进行标准化
+        """
+        if feature_columns is None:
+            # 获取所有特征列
+            base_columns = ['day', 'code', 'open', 'high', 'low', 'close', 'volume', 
+                           'amount', 'zf', 'zdf', 'zde', 'hsl', 'return', 'market']
+            feature_columns = [col for col in df.columns if col not in base_columns]
+        
+        # 筛选出数值型特征列
+        numeric_columns = []
+        non_numeric_columns = []
+        
+        for col in feature_columns:
+            if col in df.columns:
+                # 检查列是否为数值型
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    numeric_columns.append(col)
+                else:
+                    non_numeric_columns.append(col)
+        
+        print(f"  数值型特征: {len(numeric_columns)} 个")
+        print(f"  非数值型特征: {len(non_numeric_columns)} 个")
+        
+        if non_numeric_columns:
+            print(f"  跳过非数值型特征: {', '.join(non_numeric_columns[:5])}" + 
+                  (f"... 等 {len(non_numeric_columns)-5} 个" if len(non_numeric_columns) > 5 else ""))
+        
+        if not numeric_columns:
+            print("  警告: 没有找到可标准化的数值型特征")
+            return df, None
+        
+        # 分离特征和非特征列
+        all_non_feature_cols = [col for col in df.columns if col not in numeric_columns]
+        non_feature_data = df[all_non_feature_cols].copy()
+        feature_data = df[numeric_columns].copy()
+        
+        # 标准化
+        scaler = StandardScaler()
+        feature_data_standardized = pd.DataFrame(
+            scaler.fit_transform(feature_data),
+            columns=feature_data.columns,
+            index=feature_data.index
+        )
+        
+        # 合并
+        result_df = pd.concat([non_feature_data, feature_data_standardized], axis=1)
+        
+        return result_df, scaler
+
+# ============================================================================
+# 3. 特征可视化器
+# ============================================================================
+
+class FeatureVisualizer:
+    """
+    特征可视化器
+    """
+    
+    def __init__(self):
+        """初始化"""
+        self.figsize = (15, 10)
+    
+    def plot_feature_categories(self, feature_library):
+        """
+        绘制特征类别分布
+        """
+        summary = feature_library.get_feature_summary()
+        
+        categories = []
+        counts = []
+        
+        for category, info in summary['by_category'].items():
+            if info['count'] > 0:
+                categories.append(category)
+                counts.append(info['count'])
+        
+        plt.figure(figsize=self.figsize)
+        
+        # 创建子图
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+        
+        # 1. 特征数量条形图
+        axes[0, 0].bar(categories, counts, color=plt.cm.Set3(np.arange(len(categories))/len(categories)))
+        axes[0, 0].set_title(f'特征库类别分布 (总计: {summary["total_features"]}个特征)')
+        axes[0, 0].set_xlabel('特征类别')
+        axes[0, 0].set_ylabel('特征数量')
+        axes[0, 0].tick_params(axis='x', rotation=45)
+        
+        # 添加数量标签
+        for i, v in enumerate(counts):
+            axes[0, 0].text(i, v + max(counts)*0.01, str(v), ha='center', fontsize=10)
+        
+        # 2. 饼图
+        axes[0, 1].pie(counts, labels=categories, autopct='%1.1f%%', 
+                       colors=plt.cm.Set3(np.arange(len(categories))/len(categories)))
+        axes[0, 1].set_title('特征类别占比')
+        
+        # 3. 特征示例表格
+        feature_examples = []
+        for category, info in summary['by_category'].items():
+            if info['features']:
+                feature_examples.append(f"{category}: {', '.join(info['features'][:3])}...")
+        
+        axes[1, 0].axis('off')
+        axes[1, 0].set_title('特征示例 (每类前3个)')
+        
+        # 创建表格
+        table_data = []
+        for i, example in enumerate(feature_examples):
+            table_data.append([example])
+        
+        table = axes[1, 0].table(cellText=table_data, 
+                                 cellLoc='left',
+                                 loc='center',
+                                 colWidths=[1])
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1, 2)
+        
+        # 4. 特征数量趋势
+        axes[1, 1].axis('off')
+        axes[1, 1].text(0.1, 0.5, 
+                       f"特征库统计:\\n"
+                       f"总特征数: {summary['total_features']}\\n"
+                       f"类别数: {len(categories)}\\n"
+                       f"最大类别: {categories[np.argmax(counts)]} ({max(counts)}个)\\n"
+                       f"最小类别: {categories[np.argmin(counts)]} ({min(counts)}个)",
+                       fontsize=12, verticalalignment='center')
+        
+        plt.suptitle('量化特征库 - 4+2维度特征分析', fontsize=16, fontweight='bold')
+        plt.tight_layout()
+        plt.show()
+    
+    def plot_feature_correlation(self, df, max_features=20):
+        """
+        绘制特征相关性热力图
+        """
+        # 选择数值型特征
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        
+        # 排除基础数据列
+        base_cols = ['open', 'high', 'low', 'close', 'volume', 'amount', 'zf', 'zdf', 'zde', 'hsl', 'return']
+        feature_cols = [col for col in numeric_cols if col not in base_cols]
+        
+        # 限制特征数量
+        if len(feature_cols) > max_features:
+            # 选择与收益率相关性最高的特征
+            if 'return' in df.columns:
+                correlations = []
+                for col in feature_cols:
+                    if df[col].notna().sum() > 10:  # 至少有10个非空值
+                        corr = df[col].corr(df['return'])
+                        if not pd.isna(corr):
+                            correlations.append((col, abs(corr)))
+                
+                # 按相关性绝对值排序
+                correlations.sort(key=lambda x: x[1], reverse=True)
+                selected_cols = [col for col, _ in correlations[:max_features]]
+            else:
+                selected_cols = feature_cols[:max_features]
+        else:
+            selected_cols = feature_cols
+        
+        # 计算相关系数矩阵
+        corr_matrix = df[selected_cols].corr()
+        
+        # 绘制热力图
+        plt.figure(figsize=(12, 10))
+        
+        # 使用seaborn绘制热力图
+        mask = np.triu(np.ones_like(corr_matrix, dtype=bool))
+        sns.heatmap(corr_matrix, mask=mask, annot=False, cmap='coolwarm', 
+                   center=0, square=True, linewidths=0.5, cbar_kws={"shrink": 0.8})
+        
+        plt.title(f'特征相关性热力图 (前{len(selected_cols)}个特征)', fontsize=16, fontweight='bold')
+        plt.tight_layout()
+        plt.show()
+        
+        # 显示与收益率相关性最高的特征
+        if 'return' in df.columns:
+            return_correlations = []
+            for col in selected_cols:
+                corr = df[col].corr(df['return'])
+                if not pd.isna(corr):
+                    return_correlations.append((col, corr))
+            
+            return_correlations.sort(key=lambda x: abs(x[1]), reverse=True)
+            
+            print("\\n与收益率相关性最高的特征:")
+            print("-" * 50)
+            for col, corr in return_correlations[:10]:
+                print(f"{col:30s} : {corr:+.4f}")
+    
+    def plot_feature_distributions(self, df, feature_names=None, n_cols=3):
+        """
+        绘制特征分布图
+        """
+        if feature_names is None:
+            # 选择数值型特征
+            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            base_cols = ['open', 'high', 'low', 'close', 'volume', 'amount', 'zf', 'zdf', 'zde', 'hsl', 'return']
+            feature_names = [col for col in numeric_cols if col not in base_cols]
+        
+        # 限制特征数量
+        feature_names = feature_names[:12]
+        
+        # 计算子图布局
+        n_features = len(feature_names)
+        n_rows = (n_features + n_cols - 1) // n_cols
+        
+        plt.figure(figsize=(5*n_cols, 4*n_rows))
+        
+        for i, feature in enumerate(feature_names, 1):
+            if feature not in df.columns:
+                continue
+            
+            plt.subplot(n_rows, n_cols, i)
+            
+            # 绘制直方图
+            data = df[feature].dropna()
+            if len(data) > 0:
+                plt.hist(data, bins=30, alpha=0.7, color='steelblue', edgecolor='black')
+                plt.axvline(data.mean(), color='red', linestyle='--', linewidth=1.5, label=f'均值: {data.mean():.4f}')
+                plt.axvline(data.median(), color='green', linestyle='-.', linewidth=1.5, label=f'中位数: {data.median():.4f}')
+                
+                plt.title(feature, fontsize=10)
+                plt.xlabel('值')
+                plt.ylabel('频数')
+                plt.legend(fontsize=8)
+                plt.grid(True, alpha=0.3)
+        
+        plt.suptitle('特征分布图', fontsize=16, fontweight='bold')
+        plt.tight_layout()
+        plt.show()
+    def plot_stock_with_features(self, df, stock_code, features_to_plot=None):
+        """
+        绘制股票价格与特征
+        """
+        if features_to_plot is None:
+            features_to_plot = ['ma5', 'ma20', 'ma60', 'bb_upper', 'bb_lower', 'rsi', 'macd']
+        
+        # 创建子图
+        fig, axes = plt.subplots(3, 1, figsize=(15, 12))
+        
+        # 1. 价格与趋势指标
+        ax1 = axes[0]
+        ax1.plot(df['day'], df['close'], label='收盘价', color='black', linewidth=1.5)
+        
+        # 绘制移动平均线
+        for ma in ['ma5', 'ma20', 'ma60']:
+            if ma in df.columns:
+                ax1.plot(df['day'], df[ma], label=ma, alpha=0.7, linewidth=1)
+        
+        # 绘制布林带
+        if 'bb_upper' in df.columns and 'bb_lower' in df.columns:
+            ax1.fill_between(df['day'], df['bb_upper'], df['bb_lower'], 
+                           alpha=0.2, color='gray', label='布林带')
+        
+        ax1.set_title(f'{stock_code} - 价格与趋势指标', fontsize=14)
+        ax1.set_xlabel('日期')
+        ax1.set_ylabel('价格')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # 2. 动量指标
+        ax2 = axes[1]
+        
+        # RSI
+        if 'rsi' in df.columns:
+            ax2.plot(df['day'], df['rsi'], label='RSI', color='blue', linewidth=1.5)
+            ax2.axhline(y=70, color='red', linestyle='--', alpha=0.5, label='超买线 (70)')
+            ax2.axhline(y=30, color='green', linestyle='--', alpha=0.5, label='超卖线 (30)')
+            ax2.axhline(y=50, color='gray', linestyle='-', alpha=0.3)
+        
+        # MACD
+        if 'macd' in df.columns:
+            ax2_twin = ax2.twinx()
+            ax2_twin.plot(df['day'], df['macd'], label='MACD', color='orange', linewidth=1.5, alpha=0.7)
+            ax2_twin.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+            ax2_twin.set_ylabel('MACD')
+            
+            # 合并图例
+            lines1, labels1 = ax2.get_legend_handles_labels()
+            lines2, labels2 = ax2_twin.get_legend_handles_labels()
+            ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+        
+        ax2.set_title('动量指标', fontsize=14)
+        ax2.set_xlabel('日期')
+        ax2.set_ylabel('RSI')
+        ax2.grid(True, alpha=0.3)
+        
+        # 3. 成交量与波动率
+        ax3 = axes[2]
+        
+        # 成交量
+        if 'volume' in df.columns:
+            ax3.bar(df['day'], df['volume'], label='成交量', alpha=0.5, color='blue')
+            ax3.set_ylabel('成交量', color='blue')
+            ax3.tick_params(axis='y', labelcolor='blue')
+        
+        # 波动率
+        if 'hist_volatility' in df.columns:
+            ax3_twin = ax3.twinx()
+            ax3_twin.plot(df['day'], df['hist_volatility'], label='历史波动率', 
+                         color='red', linewidth=2)
+            ax3_twin.set_ylabel('波动率', color='red')
+            ax3_twin.tick_params(axis='y', labelcolor='red')
+            
+            # 合并图例
+            lines1, labels1 = ax3.get_legend_handles_labels()
+            lines2, labels2 = ax3_twin.get_legend_handles_labels()
+            ax3.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+        
+        ax3.set_title('成交量与波动率', fontsize=14)
+        ax3.set_xlabel('日期')
+        ax3.grid(True, alpha=0.3)
+        
+        plt.suptitle(f'股票 {stock_code} 多维特征分析', fontsize=16, fontweight='bold')
+        plt.tight_layout()
+        plt.show()
+
+# ============================================================================
+# 4. 特征分析报告生成器
+# ============================================================================
+
+class FeatureAnalysisReport:
+    """
+    特征分析报告生成器
+    """
+    
+    def __init__(self, feature_library, all_features):
+        """
+        初始化
+        """
+        self.feature_library = feature_library
+        self.all_features = all_features
+        self.report_data = {}
+    
+    def generate_summary_report(self):
+        """
+        生成摘要报告
+        """
+        summary = self.feature_library.get_feature_summary()
+        
+        report = {
+            'timestamp': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'stock_count': len(self.all_features),
+            'feature_summary': summary,
+            'feature_statistics': {}
+        }
+        
+        # 统计特征的基本信息
+        for stock_code, df in list(self.all_features.items())[:5]:  # 只分析前5只股票
+            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            
+            stats = {}
+            for col in numeric_cols[:10]:  # 只分析前10个特征
+                if col in df.columns:
+                    stats[col] = {
+                        'mean': float(df[col].mean()),
+                        'std': float(df[col].std()),
+                        'min': float(df[col].min()),
+                        'max': float(df[col].max()),
+                        'null_count': int(df[col].isnull().sum())
+                    }
+            
+            report['feature_statistics'][stock_code] = stats
+        
+        return report
+    
+    def print_report(self, report):
+        """
+        打印报告
+        """
+        print("=" * 80)
+        print("量化特征库分析报告")
+        print("=" * 80)
+        print(f"生成时间: {report['timestamp']}")
+        print(f"股票数量: {report['stock_count']}")
+        print(f"总特征数: {report['feature_summary']['total_features']}")
+        
+        print("\\n特征类别分布:")
+        print("-" * 60)
+        for category, info in report['feature_summary']['by_category'].items():
+            if info['count'] > 0:
+                print(f"  {category.upper():15s}: {info['count']:3d} 个特征")
+                if info['features']:
+                    features_str = ", ".join(info['features'][:3])
+                    if len(info['features']) > 3:
+                        features_str += f"... (+{len(info['features'])-3}个)"
+                    print(f"        示例: {features_str}")
+        
+        print("\\n特征统计信息 (示例股票):")
+        print("-" * 60)
+        for stock_code, stats in list(report['feature_statistics'].items())[:2]:
+            print(f"\\n股票: {stock_code}")
+            for feature, feature_stats in list(stats.items())[:5]:
+                print(f"  {feature:20s}: 均值={feature_stats['mean']:.4f}, "
+                      f"标准差={feature_stats['std']:.4f}, "
+                      f"范围=[{feature_stats['min']:.4f}, {feature_stats['max']:.4f}]")
+        
+        print("\\n" + "=" * 80)
+    
+    def save_report_to_file(self, report, filepath="feature_analysis_report.txt"):
+        """
+        保存报告到文件
+        """
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write("=" * 80 + "\\n")
+            f.write("量化特征库分析报告\\n")
+            f.write("=" * 80 + "\\n\\n")
+            
+            f.write(f"生成时间: {report['timestamp']}\\n")
+            f.write(f"股票数量: {report['stock_count']}\\n")
+            f.write(f"总特征数: {report['feature_summary']['total_features']}\\n\\n")
+            
+            f.write("特征类别分布:\\n")
+            f.write("-" * 60 + "\\n")
+            for category, info in report['feature_summary']['by_category'].items():
+                if info['count'] > 0:
+                    f.write(f"{category.upper():15s}: {info['count']:3d} 个特征\\n")
+                    if info['features']:
+                        features_str = ", ".join(info['features'][:5])
+                        if len(info['features']) > 5:
+                            features_str += f"... (+{len(info['features'])-5}个)"
+                        f.write(f"      示例: {features_str}\\n")
+            
+            f.write("\\n特征投资逻辑说明:\\n")
+            f.write("-" * 60 + "\\n")
+            f.write("1. 趋势类特征: 识别股票价格长期趋势，用于判断市场方向\\n")
+            f.write("2. 动量类特征: 捕捉价格变化的速度和幅度，用于发现超买超卖\\n")
+            f.write("3. 成交量类特征: 分析交易活跃度，确认价格变动的可靠性\\n")
+            f.write("4. 波动率类特征: 衡量价格波动程度，用于风险管理\\n")
+            f.write("5. 相对强度特征: 比较个股与市场表现，发现相对强势股\\n")
+            f.write("6. 时间维度特征: 识别季节性和周期性模式\\n")
+            
+            f.write("\\n" + "=" * 80 + "\\n")
+        
+        print(f"报告已保存到: {filepath}")
+
+# ============================================================================
+# 5. 主程序
+# ============================================================================
+
+def main():
+    """
+    主程序：构建4+2维度量化特征库
+    """
+    print("=" * 80)
+    print("数学建模竞赛 - 任务一")
+    print("基于多维K线数据的量化特征库构建")
+    print("4+2维度：趋势类、动量类、成交量类、波动率类 + 相对强度、时间维度")
+    print("=" * 80)
+    
+    # 1. 数据加载
+    print("\\n[步骤1] 加载股票数据...")
+    
+    # 设置数据路径（请根据实际情况修改）
+    data_path = r"E:\\\\day"  # 修改为你的数据路径
+    
+    if not os.path.exists(data_path):
+        print(f"错误: 数据路径不存在: {data_path}")
+        print("请修改代码中的 data_path 变量为正确的路径")
+        return None
+    
+    # 创建数据加载器
+    data_loader = StockDataLoader(data_path)
+    
+    # 加载所有股票数据
+    stock_data = data_loader.load_all_stocks()
+    
+    if not stock_data:
+        print("错误: 没有加载到任何股票数据!")
+        print("请检查:")
+        print(f"  1. 数据路径是否正确: {data_path}")
+        print(f"  2. 该路径下是否有CSV文件")
+        print(f"  3. CSV文件格式是否正确")
+        return None
+    
+    # 获取市场数据
+    market_data = data_loader.get_market_data()
+    if market_data is not None:
+        print(f"已加载市场指数数据，数据行数: {len(market_data)}")
+    else:
+        print("警告: 未找到市场指数数据，将跳过相对强度特征计算")
+    
+    # 2. 特征计算
+    print("\\n[步骤2] 计算4+2维度特征库...")
+    
+    # 创建特征库
+    feature_library = QuantitativeFeatureLibrary()
+    
+    # 为每只股票计算特征
+    all_features = {}
+    processed_count = 0
+    error_stocks = []
+    
+    for stock_code, df in list(stock_data.items())[:50]:  # 限制处理前50只股票以节省时间
+        try:
+            print(f"  处理股票: {stock_code} ({processed_count+1}/{min(50, len(stock_data))})")
+            
+            # 检查数据是否有效
+            if df.empty or 'close' not in df.columns or df['close'].isna().all():
+                print(f"    警告: 股票 {stock_code} 数据无效，跳过")
+                error_stocks.append(stock_code)
+                continue
+            
+            # 计算特征
+            features_df = feature_library.calculate_all_features(df, market_data)
+            
+            # 处理缺失值
+            features_df = features_df.fillna(method='ffill').fillna(0)
+            
+            # 存储特征数据
+            all_features[stock_code] = features_df
+            
+            processed_count += 1
+            
+            # 显示进度
+            if processed_count % 10 == 0:
+                print(f"    已处理 {processed_count} 只股票")
+                
+        except Exception as e:
+            error_detail = str(e)
+            if len(error_detail) > 100:
+                error_detail = error_detail[:100] + "..."
+            print(f"  处理 {stock_code} 时出错: {error_detail}")
+            error_stocks.append(stock_code)
+            continue
+    
+    print(f"\\n特征计算完成! 成功处理 {len(all_features)} 只股票")
+    if error_stocks:
+        print(f"  处理失败的股票: {len(error_stocks)} 只")
+        if len(error_stocks) <= 20:
+            print(f"  {', '.join(error_stocks)}")
+        else:
+            print(f"  {', '.join(error_stocks[:20])}... (还有{len(error_stocks)-20}只)")
+    
+    # 3. 特征标准化
+    print("\\n[步骤3] 标准化特征...")
+    
+    all_features_standardized = {}
+    standardization_errors = []
+    
+    for stock_code, features_df in list(all_features.items())[:20]:  # 只标准化前20只股票
+        try:
+            standardized_df, scaler = feature_library.standardize_features(features_df)
+            if standardized_df is not None:
+                all_features_standardized[stock_code] = standardized_df
+                print(f"  ✓ 已标准化: {stock_code} ({len(features_df.columns)}个特征, {len(standardized_df.columns)}列)")
+            else:
+                standardization_errors.append(stock_code)
+                print(f"  × 标准化失败: {stock_code} (没有数值型特征)")
+        except Exception as e:
+            standardization_errors.append(stock_code)
+            print(f"  × 标准化 {stock_code} 时出错: {e}")
+    
+    if standardization_errors:
+        print(f"\\n警告: {len(standardization_errors)} 只股票标准化失败: {', '.join(standardization_errors[:10])}" +
+              (f"..." if len(standardization_errors) > 10 else ""))
+        
+    # 4. 特征分析
+    print("\\n[步骤4] 生成特征分析报告...")
+    
+    # 创建报告生成器
+    report_generator = FeatureAnalysisReport(feature_library, all_features)
+    
+    # 生成报告
+    report = report_generator.generate_summary_report()
+    
+    # 打印报告
+    report_generator.print_report(report)
+    
+    # 保存报告
+    report_generator.save_report_to_file(report, "quantitative_feature_report.txt")
+    
+    # 5. 可视化
+    print("\\n[步骤5] 生成可视化图表...")
+    
+    visualizer = FeatureVisualizer()
+    
+    # 绘制特征类别分布
+    visualizer.plot_feature_categories(feature_library)
+    
+    # 绘制特征相关性
+    if all_features:
+        sample_stock = list(all_features.keys())[0]
+        sample_df = all_features[sample_stock]
+        visualizer.plot_feature_correlation(sample_df, max_features=15)
+        
+        # 绘制特征分布
+        feature_names = list(feature_library.feature_categories.get('trend', []))[:6]
+        visualizer.plot_feature_distributions(sample_df, feature_names)
+        
+        # 绘制股票特征图
+        visualizer.plot_stock_with_features(sample_df, sample_stock)
+    # 6. 保存特征数据
+    print("\\n[步骤6] 保存特征数据...")
+    
+    output_dir = "feature_library_output"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 保存原始特征
+    raw_features_dir = os.path.join(output_dir, "raw_features")
+    os.makedirs(raw_features_dir, exist_ok=True)
+    
+    for stock_code, features_df in list(all_features.items())[:10]:  # 只保存前10只
+        output_path = os.path.join(raw_features_dir, f"{stock_code}_features.csv")
+        features_df.to_csv(output_path, index=False, encoding='utf-8-sig')
+        print(f"  保存原始特征: {stock_code}")
+    
+    # 保存标准化特征
+    standardized_dir = os.path.join(output_dir, "standardized_features")
+    os.makedirs(standardized_dir, exist_ok=True)
+    
+    for stock_code, features_df in list(all_features_standardized.items())[:10]:
+        output_path = os.path.join(standardized_dir, f"{stock_code}_features_standardized.csv")
+        features_df.to_csv(output_path, index=False, encoding='utf-8-sig')
+        print(f"  保存标准化特征: {stock_code}")
+    
+    # 保存特征摘要
+    summary_path = os.path.join(output_dir, "feature_summary.json")
+    
+    import json
+    with open(summary_path, 'w', encoding='utf-8') as f:
+        # 转换无法序列化的对象
+        serializable_summary = {
+            'total_features': report['feature_summary']['total_features'],
+            'by_category': {}
+        }
+        
+        for category, info in report['feature_summary']['by_category'].items():
+            serializable_summary['by_category'][category] = {
+                'count': info['count'],
+                'features': info['features']
+            }
+        
+        json.dump(serializable_summary, f, ensure_ascii=False, indent=2)
+    
+    print(f"  特征摘要已保存到: {summary_path}")
+    # 7. 完成
+    print("\\n" + "=" * 80)
+    print("任务一完成!")
+    print("=" * 80)
+    print(f"\\n输出文件保存在: {output_dir}")
+    print("\\n主要输出:")
+    print(f"  1. 特征分析报告: quantitative_feature_report.txt")
+    print(f"  2. 特征摘要: {output_dir}/feature_summary.json")
+    print(f"  3. 原始特征数据: {output_dir}/raw_features/")
+    print(f"  4. 标准化特征数据: {output_dir}/standardized_features/")
+    print(f"  5. 可视化图表: 已显示在屏幕上")
+    
+    return {
+        'stock_data': stock_data,
+        'all_features': all_features,
+        'all_features_standardized': all_features_standardized,
+        'feature_library': feature_library,
+        'report': report
+    }
+
+# ============================================================================
+# 程序入口
+# ============================================================================
+
+if __name__ == "__main__":
+    """
+    程序入口点
+    """
+    print("数学建模竞赛 - 量化特征库构建系统")
+    print("版本: 1.0")
+    print("作者: 数学建模团队")
+    print("日期: 2024年")
+    print("\\n注意事项:")
+    print("1. 请确保数据路径正确")
+    print("2. 数据文件应为CSV格式")
+    print("3. 建议至少有10只股票的数据")
+    print("4. 程序运行时间取决于数据量大小")
+    
+    # 运行主程序
+    try:
+        results = main()
+        
+        if results:
+            print("\\n程序执行成功!")
+            print(f"共处理 {len(results['all_features'])} 只股票")
+            print(f"生成 {results['feature_library'].get_feature_summary()['total_features']} 个特征")
+        else:
+            print("\\n程序执行失败，请检查错误信息!")
+            
+    except Exception as e:
+        print(f"\\n程序执行出错: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    print("\\n程序结束!")

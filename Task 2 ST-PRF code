@@ -1,0 +1,1431 @@
+import pandas as pd
+import numpy as np
+import os
+from pathlib import Path
+import warnings
+warnings.filterwarnings('ignore')
+
+class StockDataLoader:
+    """
+    股票数据加载器 - 支持分层目录结构
+    """
+    def __init__(self, data_path):
+        self.data_path = Path(data_path)
+        self.stock_files = []
+        self.all_data = {}
+    
+    def load_all_stocks(self):
+        """
+        加载所有股票数据 - 支持递归查找子文件夹中的CSV文件
+        """
+        print("正在递归读取股票数据...")
+        print(f"根目录: {self.data_path}")
+        
+        # 递归获取所有CSV文件
+        self.stock_files = list(self.data_path.rglob("*.csv"))
+        print(f"找到 {len(self.stock_files)} 个股票文件")
+        
+        if len(self.stock_files) == 0:
+            print("警告：没有找到任何CSV文件！")
+            print("请检查路径是否正确，文件是否存在")
+            return self.all_data
+        
+        # 逐个读取
+        for file_path in self.stock_files:
+            try:
+                # 获取文件名（不含扩展名）作为股票代码
+                stock_code = file_path.stem
+                
+                # 打印文件路径信息
+                relative_path = file_path.relative_to(self.data_path)
+                print(f"  加载: {relative_path} -> {stock_code}")
+                
+                # 读取CSV文件
+                df = pd.read_csv(file_path)
+                
+                # 查看原始列名
+                print(f"    原始列名: {list(df.columns)}")
+                
+                # 重命名列以统一格式 - 根据你的数据表结构
+                # 注意：根据你提供的图片，列名可能有所不同
+                column_mapping = {}
+                
+                # 尝试根据不同的列名模式进行映射
+                for col in df.columns:
+                    col_lower = str(col).strip().lower()
+                    
+                    # 映射常见列名
+                    if col_lower in ['day', 'date', '交易日']:
+                        column_mapping[col] = 'day'
+                    elif col_lower in ['code', '股票代码', 'stock_code']:
+                        column_mapping[col] = 'code'
+                    elif col_lower in ['open', '开盘价', '开盘']:
+                        column_mapping[col] = 'open'
+                    elif col_lower in ['close', '收盘价', '收盘']:
+                        column_mapping[col] = 'close'
+                    elif col_lower in ['high', '最高价', '最高']:
+                        column_mapping[col] = 'high'
+                    elif col_lower in ['low', '最低价', '最低']:
+                        column_mapping[col] = 'low'
+                    elif col_lower in ['volume', '成交量', '成交额']:
+                        column_mapping[col] = 'volume'
+                    elif col_lower in ['amount', '成交额', 'amount']:
+                        column_mapping[col] = 'amount'
+                    elif col_lower in ['zf', '振幅']:
+                        column_mapping[col] = 'zf'
+                    elif col_lower in ['zdf', '涨跌幅', 'change_pct']:
+                        column_mapping[col] = 'zdf'
+                    elif col_lower in ['zde', '涨跌额']:
+                        column_mapping[col] = 'zde'
+                    elif col_lower in ['hsl', 'hs1', '换手率']:
+                        column_mapping[col] = 'hsl'
+                    elif col_lower in ['market', '市场指数', '大盘']:
+                        column_mapping[col] = 'market'
+                
+                # 应用列名映射
+                df = df.rename(columns=column_mapping)
+                
+                # 确保必要的列存在
+                required_columns = ['day', 'close']
+                missing_columns = [col for col in required_columns if col not in df.columns]
+                
+                if missing_columns:
+                    print(f"    警告: 缺少必要列 {missing_columns}")
+                    print(f"    当前列: {list(df.columns)}")
+                    continue
+                
+                # 确保day列是datetime类型
+                try:
+                    df['day'] = pd.to_datetime(df['day'])
+                except Exception as e:
+                    print(f"    日期转换错误: {e}")
+                    # 尝试不同的日期格式
+                    try:
+                        df['day'] = pd.to_datetime(df['day'], format='%Y/%m/%d')
+                    except:
+                        try:
+                            df['day'] = pd.to_datetime(df['day'], format='%Y-%m-%d')
+                        except:
+                            print(f"    无法解析日期列，跳过文件 {file_path}")
+                            continue
+                
+                # 按日期排序
+                df = df.sort_values('day').reset_index(drop=True)
+                
+                # 计算日收益率
+                df['return'] = df['close'].pct_change()
+                
+                # 存储数据
+                self.all_data[stock_code] = df
+                
+                print(f"    成功加载，数据行数: {len(df)}")
+                
+            except Exception as e:
+                print(f"  读取 {file_path} 时出错: {str(e)[:100]}...")
+        
+        print(f"\\n数据加载完成！共加载 {len(self.all_data)} 只股票")
+        
+        # 打印加载的股票代码
+        if self.all_data:
+            print("加载的股票代码:")
+            stock_codes = list(self.all_data.keys())
+            for i in range(0, len(stock_codes), 10):  # 每10个一行
+                print("  " + ", ".join(stock_codes[i:i+10]))
+        
+        return self.all_data
+
+    def get_stock_count_by_folder(self):
+        """
+        统计每个文件夹中的股票数量
+        """
+        if not self.stock_files:
+            print("没有找到股票文件")
+            return {}
+        
+        folder_counts = {}
+        for file_path in self.stock_files:
+            folder_name = file_path.parent.name
+            folder_counts[folder_name] = folder_counts.get(folder_name, 0) + 1
+        
+        print("\\n各文件夹股票数量统计:")
+        for folder, count in sorted(folder_counts.items()):
+            print(f"  文件夹 {folder}: {count} 个文件")
+        
+        total = sum(folder_counts.values())
+        print(f"  总计: {total} 个文件")
+        
+        return folder_counts
+
+class ShortTermFeatureEngineer:
+    """
+    短期策略特征工程
+    """
+
+    def calculate_short_term_features(self, df):
+        """
+        计算短期交易特征
+        """
+        # 1. 价格动量特征
+        df = self._calculate_momentum_features(df)
+
+        # 2. 成交量特征
+        df = self._calculate_volume_features(df)
+
+        # 3. 技术指标特征
+        df = self._calculate_technical_features(df)
+
+        # 4. 市场情绪特征
+        df = self._calculate_market_features(df)
+
+        # 5. 波动率特征
+        df = self._calculate_volatility_features(df)
+
+        return df
+
+    def _calculate_momentum_features(self, df):
+        """动量特征"""
+        # 短期收益率
+        for period in [1, 3, 5, 10]:
+            df[f'return_{period}d'] = df['close'].pct_change(period)
+
+        # 价格突破特征
+        df['price_breakout_high_5d'] = (df['close'] > df['high'].rolling(5).max().shift(1))
+        df['price_breakout_low_5d'] = (df['close'] < df['low'].rolling(5).min().shift(1))
+
+        # 价格位置（相对于最近N日）
+        df['price_position_5d'] = ((df['close'] - df['low'].rolling(5).min()) / 
+                              (df['high'].rolling(5).max() - df['low'].rolling(5).min()))
+
+        # 当日涨跌
+        df['is_up'] = (df['zdf'] > 0).astype(int)
+        df['is_down'] = (df['zdf'] < 0).astype(int)
+
+        # 连续上涨/下跌天数
+        df['up_streak'] = 0
+        df['down_streak'] = 0
+        for i in range(1, len(df)):
+            if df['zdf'].iloc[i] > 0:
+                df['up_streak'].iloc[i] = df['up_streak'].iloc[i-1] + 1
+            else:
+                df['up_streak'].iloc[i] = 0
+                
+            if df['zdf'].iloc[i] < 0:
+                df['down_streak'].iloc[i] = df['down_streak'].iloc[i-1] + 1
+            else:
+                df['down_streak'].iloc[i] = 0
+
+        return df
+
+    def _calculate_volume_features(self, df):
+        """成交量特征"""
+        # 成交量移动平均
+        df['volume_ma5'] = df['volume'].rolling(5).mean()
+        df['volume_ma10'] = df['volume'].rolling(10).mean()
+
+        # 成交量比率
+        df['volume_ratio'] = df['volume'] / df['volume_ma5']
+        df['volume_surge'] = (df['volume_ratio'] > 2).astype(int)  # 成交量突增
+
+        # 量价关系
+        df['price_up_volume_up'] = ((df['zdf'] > 0) & (df['volume_ratio'] > 1)).astype(int)
+        df['price_down_volume_up'] = ((df['zdf'] < 0) & (df['volume_ratio'] > 1)).astype(int)
+
+        # 换手率特征
+        df['hsl_ma5'] = df['hsl'].rolling(5).mean()
+        df['hsl_ratio'] = df['hsl'] / df['hsl_ma5']
+
+        return df
+
+    def _calculate_technical_features(self, df):
+        """技术指标特征"""
+        # 移动平均线
+        df['ma5'] = df['close'].rolling(5).mean()
+        df['ma10'] = df['close'].rolling(10).mean()
+        df['ma20'] = df['close'].rolling(20).mean()
+
+        # 均线交叉
+        df['ma5_above_ma10'] = (df['ma5'] > df['ma10']).astype(int)
+        df['ma5_cross_ma10'] = ((df['ma5'] > df['ma10']) & (df['ma5'].shift(1) <= df['ma10'].shift(1))).astype(int)
+
+        # 价格相对于均线位置
+        df['price_vs_ma5'] = (df['close'] - df['ma5']) / df['ma5']
+        df['price_vs_ma10'] = (df['close'] - df['ma10']) / df['ma10']
+
+        # 振幅特征
+        df['zf_ma5'] = df['zf'].rolling(5).mean()
+        df['high_amplitude'] = (df['zf'] > df['zf_ma5'] * 1.5).astype(int)
+
+        return df
+    def _calculate_market_features(self, df):
+        """市场情绪特征"""
+        if 'market' in df.columns:
+            # 大盘收益率
+            df['market_return'] = df['market'].pct_change()
+
+            # 相对强弱
+            df['relative_return'] = df['return'] - df['market_return']
+
+            # 相对强弱指标（RS）
+            df['rs_5d'] = ((df['close'] / df['close'].shift(5) - 1) / 
+                          (df['market'] / df['market'].shift(5) - 1))
+
+            # 是否强于大盘
+            df['stronger_than_market'] = (df['relative_return'] > 0).astype(int)
+
+        return df
+
+    def _calculate_volatility_features(self, df):
+        """波动率特征"""
+        # 历史波动率
+        df['volatility_5d'] = df['return'].rolling(5).std() * np.sqrt(252)
+        df['volatility_10d'] = df['return'].rolling(10).std() * np.sqrt(252)
+
+        # ATR（平均真实波幅）
+        high_low = df['high'] - df['low']
+        high_close = np.abs(df['high'] - df['close'].shift())
+        low_close = np.abs(df['low'] - df['close'].shift())
+
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df['atr_5d'] = tr.rolling(5).mean()
+        df['atr_10d'] = tr.rolling(10).mean()
+
+        return df
+
+    def prepare_features(self, stock_data):
+        """
+        为所有股票准备特征
+        """
+        print("\\n开始计算短期策略特征...")
+
+        features_dict = {}
+        for stock_code, df in stock_data.items():
+            try:
+                # 计算特征
+                df_features = self.calculate_short_term_features(df.copy())
+                
+                # 选择短期策略相关的特征
+                short_term_feature_cols = [
+                    # 动量特征
+                    'return_1d', 'return_3d', 'return_5d', 'return_10d',
+                    'price_breakout_high_5d', 'price_breakout_low_5d',
+                    'price_position_5d', 'is_up', 'is_down',
+                    'up_streak', 'down_streak',
+                    
+                    # 成交量特征
+                    'volume_ratio', 'volume_surge',
+                    'price_up_volume_up', 'price_down_volume_up',
+                    'hsl_ratio',
+                    
+                    # 技术指标
+                    'ma5', 'ma10', 'ma20',
+                    'ma5_above_ma10', 'ma5_cross_ma10',
+                    'price_vs_ma5', 'price_vs_ma10',
+                    'high_amplitude',
+                    
+                    # 市场特征
+                    'relative_return', 'rs_5d', 'stronger_than_market',
+                    
+                    # 波动率特征
+                    'volatility_5d', 'volatility_10d',
+                    'atr_5d', 'atr_10d',
+                    
+                    # 目标变量（未来N日收益率）
+                    'close', 'zdf'  # 用于计算目标
+                ]
+                
+                # 只保留存在的特征
+                available_cols = [col for col in short_term_feature_cols if col in df_features.columns]
+                features = df_features[available_cols].copy()
+                
+                # 处理缺失值
+                features = features.fillna(method='ffill').fillna(0)
+                
+                features_dict[stock_code] = features
+                
+                print(f"  {stock_code}: 特征形状 {features.shape}")
+                
+            except Exception as e:
+                print(f"  处理 {stock_code} 时出错: {e}")
+
+        print(f"\\n特征计算完成！")
+        return features_dict
+
+class ShortTermStrategyModel:
+    """
+    短期策略模型
+    """
+
+    def __init__(self, lookback_days=60, future_days=5):
+        """
+        初始化
+        lookback_days: 用于预测的历史天数
+        future_days: 预测未来几天的收益率
+        """
+        self.lookback_days = lookback_days
+        self.future_days = future_days
+        self.models = {}  # 存储每个股票的模型
+
+    def create_target_variable(self, df):
+        """
+        创建目标变量：未来N日的收益率
+        """
+        # 计算未来N日的累计收益率
+        df['future_return'] = df['close'].shift(-self.future_days) / df['close'] - 1
+
+        # 分类目标：未来N日是否上涨
+        df['future_up'] = (df['future_return'] > 0).astype(int)
+
+        # 二值化目标：未来收益率是否超过阈值
+        threshold = 0.02  # 2%
+        df['future_positive'] = (df['future_return'] > threshold).astype(int)
+
+        return df
+
+    def prepare_model_data(self, features_dict):
+        """
+        准备模型训练数据
+        """
+        print("\\n准备模型训练数据...")
+
+        model_data = {}
+
+        for stock_code, features in features_dict.items():
+            try:
+                # 创建目标变量
+                df_with_target = self.create_target_variable(features.copy())
+                
+                # 特征列（排除目标列和价格列）
+                exclude_cols = ['close', 'zdf', 'future_return', 'future_up', 'future_positive']
+                feature_cols = [col for col in df_with_target.columns if col not in exclude_cols]
+                
+                # 确保有足够的数据
+                if len(df_with_target) < self.lookback_days + self.future_days:
+                    print(f"  {stock_code}: 数据不足，跳过")
+                    continue
+                
+                # 存储
+                model_data[stock_code] = {
+                    'features': df_with_target[feature_cols],
+                    'targets': {
+                        'return': df_with_target['future_return'],
+                        'up': df_with_target['future_up'],
+                        'positive': df_with_target['future_positive']
+                    },
+                    'dates': df_with_target.index
+                }
+                
+                print(f"  {stock_code}: 特征数 {len(feature_cols)}，样本数 {len(df_with_target)}")
+                
+            except Exception as e:
+                print(f"  准备 {stock_code} 数据时出错: {e}")
+
+        return model_data
+
+    def train_models(self, model_data):
+        """
+        训练短期策略模型
+        """
+        print("\\n开始训练短期策略模型...")
+
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.model_selection import TimeSeriesSplit
+
+        for stock_code, data in model_data.items():
+            try:
+                X = data['features'].values
+                y = data['targets']['positive'].values  # 使用二值目标
+                
+                # 标准化特征
+                scaler = StandardScaler()
+                X_scaled = scaler.fit_transform(X)
+                
+                # 使用时间序列交叉验证
+                tscv = TimeSeriesSplit(n_splits=5)
+                
+                # 训练随机森林分类器
+                model = RandomForestClassifier(
+                    n_estimators=100,
+                    max_depth=10,
+                    min_samples_split=10,
+                    random_state=42
+                )
+                
+                # 训练模型
+                train_idx = int(0.7 * len(X_scaled))  # 70%作为训练集
+                model.fit(X_scaled[:train_idx], y[:train_idx])
+                
+                # 存储模型
+                self.models[stock_code] = {
+                    'model': model,
+                    'scaler': scaler,
+                    'feature_names': data['features'].columns.tolist()
+                }
+                
+                # 在验证集上评估
+                val_predictions = model.predict_proba(X_scaled[train_idx:])[:, 1]
+                val_accuracy = np.mean((val_predictions > 0.5) == y[train_idx:])
+                
+                print(f"  {stock_code}: 模型训练完成，验证集准确率: {val_accuracy:.4f}")
+                
+            except Exception as e:
+                print(f"  训练 {stock_code} 模型时出错: {e}")
+
+        print(f"\\n模型训练完成！共训练 {len(self.models)} 个模型")
+        return self.models
+    def generate_signals(self, model_data, stock_data):
+        """
+        生成买卖信号 - 修复日期问题
+        """
+        print("\\n生成买卖信号...")
+
+        signals_dict = {}
+
+        for stock_code, data in model_data.items():
+            if stock_code not in stock_data:
+                continue
+                
+            try:
+                if stock_code not in self.models:
+                    continue
+                    
+                model_info = self.models[stock_code]
+                model = model_info['model']
+                scaler = model_info['scaler']
+                
+                # 准备特征
+                X = data['features'].values
+                X_scaled = scaler.transform(X)
+                
+                # 预测概率
+                prob_buy = model.predict_proba(X_scaled)[:, 1]
+                
+                # 从原始股票数据中获取实际日期
+                stock_df = stock_data[stock_code].copy()
+                
+                # 确保日期与特征对齐
+                # 因为特征计算可能有滞后，我们需要对齐日期
+                if len(prob_buy) <= len(stock_df):
+                    # 获取相应的日期
+                    start_idx = len(stock_df) - len(prob_buy)
+                    dates = stock_df['day'].iloc[start_idx:].reset_index(drop=True)
+                    prices = stock_df['close'].iloc[start_idx:].reset_index(drop=True)
+                else:
+                    # 如果特征长度大于原始数据，使用原始数据的日期
+                    dates = stock_df['day'].reset_index(drop=True)
+                    prices = stock_df['close'].reset_index(drop=True)
+                    # 只取前len(dates)个预测值
+                    prob_buy = prob_buy[:len(dates)]
+                
+                # 生成信号
+                df_signals = pd.DataFrame({
+                    'date': dates,  # 使用实际日期
+                    'stock_code': stock_code,
+                    'close': prices,  # 使用实际价格
+                    'buy_probability': prob_buy[:len(dates)],
+                    'signal': np.where(prob_buy[:len(dates)] > 0.6, 1, 
+                                     np.where(prob_buy[:len(dates)] < 0.4, -1, 0)),  # 1:买入, -1:卖出, 0:持有
+                    'strength': np.abs(prob_buy[:len(dates)] - 0.5)  # 信号强度
+                })
+                
+                # 确保日期是datetime类型
+                df_signals['date'] = pd.to_datetime(df_signals['date'])
+                
+                # 统计信号
+                buy_signals = (df_signals['signal'] == 1).sum()
+                sell_signals = (df_signals['signal'] == -1).sum()
+                
+                print(f"  {stock_code}: 买入信号 {buy_signals} 个，卖出信号 {sell_signals} 个")
+                
+                # 存储信号
+                signals_dict[stock_code] = df_signals
+                
+            except Exception as e:
+                print(f"  生成 {stock_code} 信号时出错: {e}")
+
+        return signals_dict
+class ShortTermBacktester:
+    """
+    短期策略回测器
+    """
+
+    def __init__(self, initial_capital=10000000):
+        """
+        初始化回测器
+        initial_capital: 初始资金（1000万）
+        """
+        self.initial_capital = initial_capital
+        self.results = {}
+
+    def run_backtest(self, signals_dict, stock_data, 
+                    commission_rate=0.0003,  # 佣金率 0.03%
+                    slippage=0.001):         # 滑点 0.1%
+        """
+        运行回测 - 修复日期合并问题
+        """
+        print(f"\\n开始回测，初始资金: {self.initial_capital:,.2f} 元")
+
+        for stock_code, signals in signals_dict.items():
+            try:
+                # 获取股票价格数据
+                if stock_code not in stock_data:
+                    print(f"  {stock_code}: 价格数据不存在，跳过")
+                    continue
+                    
+                price_data = stock_data[stock_code].copy()
+                
+                # 确保price_data有正确的日期列
+                price_data['date'] = pd.to_datetime(price_data['day'])
+                
+                # 确保signals的date列是datetime类型
+                signals['date'] = pd.to_datetime(signals['date'])
+                
+                # 按日期合并信号和价格数据
+                backtest_data = pd.merge(signals, price_data[['date', 'close']], 
+                                        on='date', how='inner', suffixes=('_signal', '_price'))
+                
+                if len(backtest_data) == 0:
+                    print(f"  {stock_code}: 没有匹配的日期数据，跳过")
+                    continue
+                
+                # 使用价格列作为交易价格
+                backtest_data['close'] = backtest_data['close_price']
+                
+                # 运行单只股票回测
+                result = self._backtest_single_stock(backtest_data, commission_rate, slippage)
+                
+                self.results[stock_code] = result
+                
+                # 打印结果
+                print(f"  {stock_code}:")
+                print(f"    最终净值: {result['final_value']:,.2f}")
+                print(f"    总收益率: {result['total_return']:.2%}")
+                print(f"    年化收益率: {result['annualized_return']:.2%}")
+                print(f"    最大回撤: {result['max_drawdown']:.2%}")
+                print(f"    胜率: {result['win_rate']:.2%}")
+                print(f"    交易次数: {result['total_trades']}")
+                
+            except Exception as e:
+                print(f"  回测 {stock_code} 时出错: {e}")
+
+        # 汇总所有股票结果
+        self._summarize_results()
+
+        return self.results
+
+    def _backtest_single_stock(self, data, commission_rate, slippage):
+        """
+        单只股票回测
+        """
+        # 初始化
+        cash = self.initial_capital
+        position = 0  # 持股数量
+        portfolio_value = cash
+        trade_log = []
+
+        # 记录每日净值
+        daily_values = []
+
+        for i in range(len(data)):
+            current_date = data['date'].iloc[i]
+            current_price = data['close'].iloc[i]
+            signal = data['signal'].iloc[i] if 'signal' in data.columns else 0
+
+            # 计算当前持仓价值
+            position_value = position * current_price
+
+            # 当前总资产
+            current_value = cash + position_value
+            daily_values.append({
+                'date': current_date,
+                'portfolio_value': current_value,
+                'cash': cash,
+                'position': position,
+                'position_value': position_value
+            })
+
+            # 执行交易信号
+            if signal == 1 and cash > 0:  # 买入信号
+                # 考虑滑点后的买入价
+                buy_price = current_price * (1 + slippage)
+                
+                # 可买入股数（全仓买入）
+                max_shares = int(cash / (buy_price * (1 + commission_rate)))
+                
+                if max_shares > 0:
+                    # 计算买入成本
+                    buy_cost = max_shares * buy_price * (1 + commission_rate)
+                    
+                    # 更新持仓和现金
+                    position += max_shares
+                    cash -= buy_cost
+                    
+                    trade_log.append({
+                        'date': current_date,
+                        'type': 'BUY',
+                        'price': buy_price,
+                        'shares': max_shares,
+                        'cost': buy_cost,
+                        'cash_after': cash
+                    })
+                    
+            elif signal == -1 and position > 0:  # 卖出信号
+                # 考虑滑点后的卖出价
+                sell_price = current_price * (1 - slippage)
+                
+                # 计算卖出收入
+                sell_amount = position * sell_price * (1 - commission_rate)
+                
+                # 更新持仓和现金
+                cash += sell_amount
+                
+                trade_log.append({
+                    'date': current_date,
+                    'type': 'SELL',
+                    'price': sell_price,
+                    'shares': position,
+                    'amount': sell_amount,
+                    'cash_after': cash
+                })
+                
+                position = 0
+
+        # 计算最终净值（如果最后还有持仓，按最后一日收盘价计算）
+        final_price = data['close'].iloc[-1]
+        final_value = cash + position * final_price
+
+        # 计算绩效指标
+        daily_df = pd.DataFrame(daily_values)
+        daily_df['return'] = daily_df['portfolio_value'].pct_change()
+
+        # 总收益率
+        total_return = (final_value - self.initial_capital) / self.initial_capital
+
+        # 年化收益率
+        days = len(daily_df)
+        annualized_return = (1 + total_return) ** (252 / days) - 1 if days > 0 else 0
+
+        # 最大回撤
+        cumulative_returns = (1 + daily_df['return'].fillna(0)).cumprod()
+        running_max = cumulative_returns.expanding().max()
+        drawdowns = cumulative_returns / running_max - 1
+        max_drawdown = drawdowns.min()
+
+        # 交易统计
+        if trade_log:
+            trades_df = pd.DataFrame(trade_log)
+
+            # 计算胜率
+            winning_trades = 0
+            total_trades = len(trade_log) // 2  # 每笔买卖配对
+
+            for i in range(0, len(trade_log) - 1, 2):
+                if i + 1 < len(trade_log):
+                    if trade_log[i]['type'] == 'BUY' and trade_log[i+1]['type'] == 'SELL':
+                        buy_price = trade_log[i]['price']
+                        sell_price = trade_log[i+1]['price']
+                        if sell_price > buy_price:
+                            winning_trades += 1
+
+            win_rate = winning_trades / total_trades if total_trades > 0 else 0
+        else:
+            total_trades = 0
+            win_rate = 0
+
+        return {
+            'final_value': final_value,
+            'total_return': total_return,
+            'annualized_return': annualized_return,
+            'max_drawdown': max_drawdown,
+            'win_rate': win_rate,
+            'total_trades': total_trades,
+            'trade_log': trade_log,
+            'daily_values': daily_df
+        }
+
+    def __init__(self, initial_capital=10000000):
+        """
+        初始化回测器
+        initial_capital: 初始资金（1000万）
+        """
+        self.initial_capital = initial_capital
+        self.results = {}
+        self.analyzer = StrategyAnalyzer()  # 添加分析器
+    
+    def _summarize_results(self):
+        """
+        汇总所有股票回测结果 - 添加分档统计
+        """
+        if not self.results:
+            print("没有回测结果可汇总")
+            return
+
+        print("\\n" + "="*60)
+        print("回测结果汇总")
+        print("="*60)
+
+        # ... [原有的汇总代码保持不变] ...
+
+        # 输出表现最好的5只股票
+        sorted_stocks = sorted(self.results.items(), 
+                          key=lambda x: x[1]['annualized_return'], 
+                          reverse=True)
+
+        print(f"\\n表现最好的5只股票:")
+        for i, (stock_code, result) in enumerate(sorted_stocks[:5]):
+            print(f"  {i+1}. {stock_code}: 年化收益 {result['annualized_return']:.2%}, "
+                  f"最大回撤 {result['max_drawdown']:.2%}, "
+                  f"胜率 {result['win_rate']:.2%}")
+
+        # 输出表现最差的5只股票
+        print(f"\\n表现最差的5只股票:")
+        for i, (stock_code, result) in enumerate(sorted_stocks[-5:]):
+            print(f"  {i+1}. {stock_code}: 年化收益 {result['annualized_return']:.2%}, "
+                  f"最大回撤 {result['max_drawdown']:.2%}, "
+                  f"胜率 {result['win_rate']:.2%}")
+        
+        # ==================== 新增的分档统计功能 ====================
+        print("\\n" + "="*80)
+        print("新增：各指标分档统计")
+        print("="*80)
+        
+        # 1. 进行分档统计
+        category_counts = self.analyzer.categorize_results(self.results)
+        
+        # 2. 生成详细汇总表格
+        self.analyzer.generate_summary_table(self.results)
+        
+        # 3. 绘制分布图
+        self.analyzer.plot_distribution_charts(self.results)
+        
+        # 4. 重点关注的股票统计
+        self._highlight_special_cases()
+    
+    def _highlight_special_cases(self):
+        """
+        重点关注的特殊情况
+        """
+        print("\\n" + "="*80)
+        print("重点关注股票列表")
+        print("="*80)
+        
+        # 1. 高收益低回撤股票
+        print("\\n高收益低回撤股票（年化>20%且回撤>-15%）:")
+        high_perf_stocks = []
+        for stock_code, result in self.results.items():
+            if result['annualized_return'] > 0.20 and result['max_drawdown'] > -0.15:
+                high_perf_stocks.append((stock_code, result))
+        
+        high_perf_stocks.sort(key=lambda x: x[1]['annualized_return'], reverse=True)
+        for stock_code, result in high_perf_stocks[:10]:
+            print(f"  {stock_code}: 年化{result['annualized_return']:.2%}, "
+                  f"回撤{result['max_drawdown']:.2%}, "
+                  f"胜率{result['win_rate']:.2%}")
+        
+        # 2. 高胜率股票
+        print("\\n高胜率股票（胜率>70%）:")
+        high_win_stocks = []
+        for stock_code, result in self.results.items():
+            if result['win_rate'] > 0.70:
+                high_win_stocks.append((stock_code, result))
+        
+        high_win_stocks.sort(key=lambda x: x[1]['win_rate'], reverse=True)
+        for stock_code, result in high_win_stocks[:10]:
+            print(f"  {stock_code}: 胜率{result['win_rate']:.2%}, "
+                  f"年化{result['annualized_return']:.2%}, "
+                  f"回撤{result['max_drawdown']:.2%}")
+        
+        # 3. 高净值股票
+        print("\\n高净值股票（最终净值>1500万）:")
+        high_value_stocks = []
+        for stock_code, result in self.results.items():
+            if result['final_value'] > 15000000:
+                high_value_stocks.append((stock_code, result))
+        
+        high_value_stocks.sort(key=lambda x: x[1]['final_value'], reverse=True)
+        for stock_code, result in high_value_stocks[:10]:
+            value_in_million = result['final_value'] / 1000000
+            print(f"  {stock_code}: 净值{value_in_million:.1f}M, "
+                  f"年化{result['annualized_return']:.2%}, "
+                  f"回撤{result['max_drawdown']:.2%}")
+    def _summarize_results(self):
+        """
+        汇总所有股票回测结果
+        """
+        if not self.results:
+            print("没有回测结果可汇总")
+            return
+
+        print("\\n" + "="*60)
+        print("回测结果汇总")
+        print("="*60)
+
+        # 计算平均值
+        avg_annual_return = np.mean([r['annualized_return'] for r in self.results.values()])
+        avg_max_drawdown = np.mean([r['max_drawdown'] for r in self.results.values()])
+        avg_win_rate = np.mean([r['win_rate'] for r in self.results.values()])
+
+        # 计算中位数
+        median_annual_return = np.median([r['annualized_return'] for r in self.results.values()])
+        median_max_drawdown = np.median([r['max_drawdown'] for r in self.results.values()])
+
+        # 统计正收益股票数量
+        positive_stocks = sum(1 for r in self.results.values() if r['annualized_return'] > 0)
+
+        print(f"股票总数: {len(self.results)}")
+        print(f"正收益股票数: {positive_stocks} ({positive_stocks/len(self.results):.1%})")
+        print(f"平均年化收益率: {avg_annual_return:.2%}")
+        print(f"年化收益率中位数: {median_annual_return:.2%}")
+        print(f"平均最大回撤: {avg_max_drawdown:.2%}")
+        print(f"最大回撤中位数: {median_max_drawdown:.2%}")
+        print(f"平均胜率: {avg_win_rate:.2%}")
+
+        # 输出表现最好的5只股票
+        sorted_stocks = sorted(self.results.items(), 
+                          key=lambda x: x[1]['annualized_return'], 
+                          reverse=True)
+
+        print(f"\\n表现最好的5只股票:")
+        for i, (stock_code, result) in enumerate(sorted_stocks[:5]):
+            print(f"  {i+1}. {stock_code}: 年化收益 {result['annualized_return']:.2%}, "
+                  f"最大回撤 {result['max_drawdown']:.2%}, "
+                  f"胜率 {result['win_rate']:.2%}")
+
+        # 输出表现最差的5只股票
+        print(f"\\n表现最差的5只股票:")
+        for i, (stock_code, result) in enumerate(sorted_stocks[-5:]):
+            print(f"  {i+1}. {stock_code}: 年化收益 {result['annualized_return']:.2%}, "
+                  f"最大回撤 {result['max_drawdown']:.2%}, "
+                  f"胜率 {result['win_rate']:.2%}")
+
+class StrategyAnalyzer:
+    """
+    策略分析器 - 添加分档统计功能
+    """
+    
+    @staticmethod
+    def categorize_results(backtest_results):
+        """
+        对回测结果进行多层次分档统计
+        
+        Parameters:
+        -----------
+        backtest_results : dict
+            回测结果字典
+            
+        Returns:
+        --------
+        dict: 各指标的分档统计结果
+        """
+        print("\\n" + "="*80)
+        print("各指标分档统计结果")
+        print("="*80)
+        
+        # 定义分档区间
+        categories = {
+            # 年化收益率分档
+            'annualized_return': [
+                ('<-20%', lambda x: x < -0.20),
+                ('-20% ~ -10%', lambda x: -0.20 <= x < -0.10),
+                ('-10% ~ 0%', lambda x: -0.10 <= x < 0),
+                ('0% ~ 5%', lambda x: 0 <= x < 0.05),
+                ('5% ~ 15%', lambda x: 0.05 <= x < 0.15),
+                ('15% ~ 30%', lambda x: 0.15 <= x < 0.30),
+                ('30% ~ 50%', lambda x: 0.30 <= x < 0.50),
+                ('50% ~ 100%', lambda x: 0.50 <= x < 1.00),
+                ('100% ~ 200%', lambda x: 1.00 <= x < 2.00),
+                ('200% ~ 300%', lambda x: 2.00 <= x < 3.00),
+                ('>=300%', lambda x: x >= 3.00)
+            ],
+            
+            # 总收益率分档
+            'total_return': [
+                ('<-20%', lambda x: x < -0.20),
+                ('-20% ~ -10%', lambda x: -0.20 <= x < -0.10),
+                ('-10% ~ 0%', lambda x: -0.10 <= x < 0),
+                ('0% ~ 5%', lambda x: 0 <= x < 0.05),
+                ('5% ~ 15%', lambda x: 0.05 <= x < 0.15),
+                ('15% ~ 30%', lambda x: 0.15 <= x < 0.30),
+                ('30% ~ 50%', lambda x: 0.30 <= x < 0.50),
+                ('50% ~ 100%', lambda x: 0.50 <= x < 1.00),
+                ('100% ~ 200%', lambda x: 1.00 <= x < 2.00),
+                ('>=200%', lambda x: x >= 2.00)
+            ],
+            
+            # 最大回撤分档（回撤为负值，越小越好）
+            'max_drawdown': [
+                ('>-5%', lambda x: x > -0.05),      # 回撤很小
+                ('-5% ~ -10%', lambda x: -0.10 < x <= -0.05),
+                ('-10% ~ -20%', lambda x: -0.20 < x <= -0.10),
+                ('-20% ~ -30%', lambda x: -0.30 < x <= -0.20),
+                ('-30% ~ -50%', lambda x: -0.50 < x <= -0.30),
+                ('<=-50%', lambda x: x <= -0.50)     # 回撤很大
+            ],
+            
+            # 胜率分档
+            'win_rate': [
+                ('<30%', lambda x: x < 0.30),
+                ('30% ~ 40%', lambda x: 0.30 <= x < 0.40),
+                ('40% ~ 50%', lambda x: 0.40 <= x < 0.50),
+                ('50% ~ 60%', lambda x: 0.50 <= x < 0.60),
+                ('60% ~ 70%', lambda x: 0.60 <= x < 0.70),
+                ('70% ~ 80%', lambda x: 0.70 <= x < 0.80),
+                ('>=80%', lambda x: x >= 0.80)
+            ],
+            
+            # 最终净值分档（相对于1000万初始资金）
+            'final_value': [
+                ('<800万', lambda x: x < 8000000),
+                ('800万~900万', lambda x: 8000000 <= x < 9000000),
+                ('900万~1000万', lambda x: 9000000 <= x < 10000000),
+                ('1000万~1100万', lambda x: 10000000 <= x < 11000000),
+                ('1100万~1200万', lambda x: 11000000 <= x < 12000000),
+                ('1200万~1500万', lambda x: 12000000 <= x < 15000000),
+                ('1500万~2000万', lambda x: 15000000 <= x < 20000000),
+                ('>=2000万', lambda x: x >= 20000000)
+            ],
+            
+            # 交易次数分档
+            'total_trades': [
+                ('0-5次', lambda x: x <= 5),
+                ('6-10次', lambda x: 6 <= x <= 10),
+                ('11-20次', lambda x: 11 <= x <= 20),
+                ('21-30次', lambda x: 21 <= x <= 30),
+                ('31-50次', lambda x: 31 <= x <= 50),
+                ('>50次', lambda x: x > 50)
+            ]
+        }
+        
+        # 存储统计结果
+        category_counts = {}
+        
+        # 对每个指标进行分档统计
+        for metric_name, metric_categories in categories.items():
+            print(f"\\n【{metric_name}】分档统计:")
+            print("-" * 60)
+            
+            counts = {}
+            # 初始化每个分档的计数
+            for category_name, _ in metric_categories:
+                counts[category_name] = 0
+            
+            # 统计每个股票落在哪个分档
+            for stock_code, result in backtest_results.items():
+                value = result.get(metric_name, 0)
+                
+                for category_name, condition_func in metric_categories:
+                    if condition_func(value):
+                        counts[category_name] += 1
+                        break
+            
+            # 打印统计结果
+            for category_name, count in counts.items():
+                percentage = (count / len(backtest_results)) * 100 if backtest_results else 0
+                print(f"  {category_name}: {count:3d} 只 ({percentage:5.1f}%)")
+            
+            category_counts[metric_name] = counts
+        
+        # 额外统计：高收益低回撤组合
+        print("\\n" + "="*80)
+        print("高收益低回撤组合统计")
+        print("="*80)
+        
+        # 定义高收益（>15%）且低回撤（>-15%）的股票
+        high_performers = {}
+        for threshold_ret in [0.15, 0.20, 0.30]:
+            for threshold_dd in [-0.15, -0.10, -0.05]:
+                count = sum(1 for r in backtest_results.values() 
+                           if r['annualized_return'] >= threshold_ret 
+                           and r['max_drawdown'] >= threshold_dd)
+                
+                key = f"年化>{threshold_ret*100:.0f}%且回撤>{threshold_dd*100:.0f}%"
+                high_performers[key] = count
+        
+        for condition, count in high_performers.items():
+            percentage = (count / len(backtest_results)) * 100 if backtest_results else 0
+            print(f"  {condition}: {count:3d} 只 ({percentage:5.1f}%)")
+        
+        return category_counts
+    
+    @staticmethod
+    def generate_summary_table(backtest_results):
+        """
+        生成详细的汇总表格
+        """
+        if not backtest_results:
+            print("没有回测结果可汇总")
+            return None
+        
+        print("\\n" + "="*80)
+        print("详细业绩分布报告")
+        print("="*80)
+        
+        # 提取所有数据
+        all_returns = [r['annualized_return'] for r in backtest_results.values()]
+        all_drawdowns = [r['max_drawdown'] for r in backtest_results.values()]
+        all_win_rates = [r['win_rate'] for r in backtest_results.values()]
+        all_final_values = [r['final_value'] for r in backtest_results.values()]
+        
+        # 计算统计量
+        stats = {
+            '年化收益率': {
+                '最小值': f"{min(all_returns)*100:.1f}%",
+                '最大值': f"{max(all_returns)*100:.1f}%",
+                '平均值': f"{np.mean(all_returns)*100:.1f}%",
+                '中位数': f"{np.median(all_returns)*100:.1f}%",
+                '标准差': f"{np.std(all_returns)*100:.1f}%",
+                '正收益比例': f"{sum(1 for r in all_returns if r > 0)/len(all_returns)*100:.1f}%",
+                '超过10%比例': f"{sum(1 for r in all_returns if r > 0.10)/len(all_returns)*100:.1f}%",
+                '超过20%比例': f"{sum(1 for r in all_returns if r > 0.20)/len(all_returns)*100:.1f}%"
+            },
+            '最大回撤': {
+                '最小值': f"{min(all_drawdowns)*100:.1f}%",
+                '最大值': f"{max(all_drawdowns)*100:.1f}%",
+                '平均值': f"{np.mean(all_drawdowns)*100:.1f}%",
+                '中位数': f"{np.median(all_drawdowns)*100:.1f}%",
+                '标准差': f"{np.std(all_drawdowns)*100:.1f}%",
+                '回撤>-10%比例': f"{sum(1 for d in all_drawdowns if d > -0.10)/len(all_drawdowns)*100:.1f}%",
+                '回撤>-20%比例': f"{sum(1 for d in all_drawdowns if d > -0.20)/len(all_drawdowns)*100:.1f}%"
+            },
+            '胜率': {
+                '最小值': f"{min(all_win_rates)*100:.1f}%",
+                '最大值': f"{max(all_win_rates)*100:.1f}%",
+                '平均值': f"{np.mean(all_win_rates)*100:.1f}%",
+                '中位数': f"{np.median(all_win_rates)*100:.1f}%",
+                '标准差': f"{np.std(all_win_rates)*100:.1f}%",
+                '胜率>50%比例': f"{sum(1 for w in all_win_rates if w > 0.50)/len(all_win_rates)*100:.1f}%",
+                '胜率>60%比例': f"{sum(1 for w in all_win_rates if w > 0.60)/len(all_win_rates)*100:.1f}%"
+            },
+            '最终净值': {
+                '最小值': f"{min(all_final_values)/10000:.1f}万",
+                '最大值': f"{max(all_final_values)/10000:.1f}万",
+                '平均值': f"{np.mean(all_final_values)/10000:.1f}万",
+                '中位数': f"{np.median(all_final_values)/10000:.1f}万",
+                '收益>0比例': f"{sum(1 for v in all_final_values if v > 10000000)/len(all_final_values)*100:.1f}%",
+                '收益>10%比例': f"{sum(1 for v in all_final_values if v > 11000000)/len(all_final_values)*100:.1f}%"
+            }
+        }
+        
+        # 打印统计表
+        for metric_name, metric_stats in stats.items():
+            print(f"\\n【{metric_name}】统计:")
+            print("-" * 60)
+            for stat_name, stat_value in metric_stats.items():
+                print(f"  {stat_name:<15}: {stat_value}")
+        
+        return stats
+    
+    @staticmethod
+    def plot_distribution_charts(backtest_results):
+        """
+        绘制分布图
+        """
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        
+        # 1. 年化收益率分布
+        annual_returns = [r['annualized_return'] for r in backtest_results.values()]
+        axes[0, 0].hist(annual_returns, bins=20, edgecolor='black', alpha=0.7)
+        axes[0, 0].axvline(np.mean(annual_returns), color='red', linestyle='--', 
+                      label=f'均值: {np.mean(annual_returns):.2%}')
+        axes[0, 0].set_title('年化收益率分布')
+        axes[0, 0].set_xlabel('年化收益率')
+        axes[0, 0].set_ylabel('股票数量')
+        axes[0, 0].legend()
+        
+        # 2. 最大回撤分布
+        max_drawdowns = [r['max_drawdown'] for r in backtest_results.values()]
+        axes[0, 1].hist(max_drawdowns, bins=20, edgecolor='black', alpha=0.7)
+        axes[0, 1].axvline(np.mean(max_drawdowns), color='red', linestyle='--',
+                      label=f'均值: {np.mean(max_drawdowns):.2%}')
+        axes[0, 1].set_title('最大回撤分布')
+        axes[0, 1].set_xlabel('最大回撤')
+        axes[0, 1].set_ylabel('股票数量')
+        axes[0, 1].legend()
+        
+        # 3. 胜率分布
+        win_rates = [r['win_rate'] for r in backtest_results.values()]
+        axes[0, 2].hist(win_rates, bins=20, edgecolor='black', alpha=0.7)
+        axes[0, 2].axvline(np.mean(win_rates), color='red', linestyle='--',
+                      label=f'均值: {np.mean(win_rates):.2%}')
+        axes[0, 2].set_title('胜率分布')
+        axes[0, 2].set_xlabel('胜率')
+        axes[0, 2].set_ylabel('股票数量')
+        axes[0, 2].legend()
+        
+        # 4. 收益率 vs 回撤散点图
+        scatter_x = [r['annualized_return'] for r in backtest_results.values()]
+        scatter_y = [r['max_drawdown'] for r in backtest_results.values()]
+        axes[1, 0].scatter(scatter_x, scatter_y, alpha=0.6)
+        axes[1, 0].set_title('收益率 vs 回撤')
+        axes[1, 0].set_xlabel('年化收益率')
+        axes[1, 0].set_ylabel('最大回撤')
+        
+        # 5. 收益率 vs 胜率散点图
+        scatter_y2 = [r['win_rate'] for r in backtest_results.values()]
+        axes[1, 1].scatter(scatter_x, scatter_y2, alpha=0.6)
+        axes[1, 1].set_title('收益率 vs 胜率')
+        axes[1, 1].set_xlabel('年化收益率')
+        axes[1, 1].set_ylabel('胜率')
+        
+        # 6. 累计净值分布
+        final_values = [r['final_value']/10000000 for r in backtest_results.values()]
+        axes[1, 2].hist(final_values, bins=20, edgecolor='black', alpha=0.7)
+        axes[1, 2].axvline(1.0, color='green', linestyle='-', alpha=0.5, label='初始净值1.0')
+        axes[1, 2].axvline(np.mean(final_values), color='red', linestyle='--',
+                      label=f'均值: {np.mean(final_values):.3f}')
+        axes[1, 2].set_title('最终净值分布（相对于初始）')
+        axes[1, 2].set_xlabel('最终净值倍数')
+        axes[1, 2].set_ylabel('股票数量')
+        axes[1, 2].legend()
+        
+        plt.suptitle('短期策略各项指标分布分析', fontsize=16, fontweight='bold')
+        plt.tight_layout()
+        plt.show()
+
+class StrategyVisualizer:
+    """
+    策略可视化
+    """
+
+    def plot_strategy_performance(self, backtest_results, top_n=5):
+        """
+        绘制策略表现
+        """
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+
+        # 设置样式
+        plt.style.use('seaborn-v0_8-darkgrid')
+        sns.set_palette("husl")
+
+        # 1. 收益率分布图
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+
+        # 提取所有股票的年化收益率
+        annual_returns = [r['annualized_return'] for r in backtest_results.values()]
+
+        # 直方图
+        axes[0, 0].hist(annual_returns, bins=20, edgecolor='black', alpha=0.7)
+        axes[0, 0].axvline(np.mean(annual_returns), color='red', linestyle='--', 
+                      label=f'均值: {np.mean(annual_returns):.2%}')
+        axes[0, 0].set_title('年化收益率分布')
+        axes[0, 0].set_xlabel('年化收益率')
+        axes[0, 0].set_ylabel('股票数量')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3)
+
+        # 2. 收益率 vs 最大回撤散点图
+        scatter_data = [(r['annualized_return'], r['max_drawdown']) 
+                   for r in backtest_results.values()]
+        scatter_x, scatter_y = zip(*scatter_data)
+
+        axes[0, 1].scatter(scatter_x, scatter_y, alpha=0.6)
+        axes[0, 1].set_title('收益率 vs 最大回撤')
+        axes[0, 1].set_xlabel('年化收益率')
+        axes[0, 1].set_ylabel('最大回撤')
+        axes[0, 1].grid(True, alpha=0.3)
+
+        # 添加象限线
+        axes[0, 1].axhline(y=0, color='gray', linestyle='-', alpha=0.5)
+        axes[0, 1].axvline(x=0, color='gray', linestyle='-', alpha=0.5)
+
+        # 3. 表现最好的股票净值曲线
+        sorted_stocks = sorted(backtest_results.items(), 
+                          key=lambda x: x[1]['annualized_return'], 
+                          reverse=True)
+
+        for i, (stock_code, result) in enumerate(sorted_stocks[:top_n]):
+            daily_values = result['daily_values']
+            if len(daily_values) > 0:
+                # 计算累计收益率
+                cumulative_return = (daily_values['portfolio_value'] / 
+                                   daily_values['portfolio_value'].iloc[0]) - 1
+                axes[1, 0].plot(daily_values['date'], cumulative_return, 
+                           label=f'{stock_code}: {result["annualized_return"]:.2%}')
+
+        axes[1, 0].set_title(f'表现最好的{top_n}只股票净值曲线')
+        axes[1, 0].set_xlabel('日期')
+        axes[1, 0].set_ylabel('累计收益率')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True, alpha=0.3)
+
+        # 4. 胜率分布图
+        win_rates = [r['win_rate'] for r in backtest_results.values() 
+                if r['win_rate'] > 0]
+
+        axes[1, 1].hist(win_rates, bins=15, edgecolor='black', alpha=0.7)
+        axes[1, 1].axvline(np.mean(win_rates), color='red', linestyle='--', 
+                      label=f'均值: {np.mean(win_rates):.2%}')
+        axes[1, 1].set_title('胜率分布')
+        axes[1, 1].set_xlabel('胜率')
+        axes[1, 1].set_ylabel('股票数量')
+        axes[1, 1].legend()
+        axes[1, 1].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.show()
+
+    def plot_single_stock_analysis(self, stock_code, backtest_result, stock_data):
+        """
+        绘制单只股票详细分析
+        """
+        import matplotlib.pyplot as plt
+
+        fig, axes = plt.subplots(3, 1, figsize=(15, 12))
+
+        # 1. 价格和信号
+        price_df = stock_data[stock_code].copy()
+        signals = backtest_result['trade_log']
+
+        axes[0].plot(price_df['day'], price_df['close'], label='收盘价', color='blue')
+
+        # 标记买入点
+        buy_dates = [t['date'] for t in signals if t['type'] == 'BUY']
+        buy_prices = [t['price'] for t in signals if t['type'] == 'BUY']
+
+        axes[0].scatter(buy_dates, buy_prices, color='green', marker='^', 
+                   s=100, label='买入', alpha=0.8)
+
+        # 标记卖出点
+        sell_dates = [t['date'] for t in signals if t['type'] == 'SELL']
+        sell_prices = [t['price'] for t in signals if t['type'] == 'SELL']
+
+        axes[0].scatter(sell_dates, sell_prices, color='red', marker='v', 
+                   s=100, label='卖出', alpha=0.8)
+
+        axes[0].set_title(f'{stock_code} - 价格和交易信号')
+        axes[0].set_xlabel('日期')
+        axes[0].set_ylabel('价格')
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+
+        # 2. 净值曲线
+        daily_values = backtest_result['daily_values']
+        axes[1].plot(daily_values['date'], daily_values['portfolio_value'], 
+                label='投资组合价值', color='purple')
+        axes[1].axhline(y=10000000, color='gray', 
+                   linestyle='--', alpha=0.5, label='初始资金')
+        axes[1].set_title(f'{stock_code} - 净值曲线')
+        axes[1].set_xlabel('日期')
+        axes[1].set_ylabel('净值')
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3)
+
+        # 3. 回撤曲线
+        cumulative_returns = (1 + daily_values['return'].fillna(0)).cumprod()
+        running_max = cumulative_returns.expanding().max()
+        drawdowns = cumulative_returns / running_max - 1
+
+        axes[2].fill_between(daily_values['date'], drawdowns, 0, 
+                        where=drawdowns < 0, color='red', alpha=0.3)
+        axes[2].plot(daily_values['date'], drawdowns, color='darkred')
+        axes[2].set_title(f'{stock_code} - 回撤曲线')
+        axes[2].set_xlabel('日期')
+        axes[2].set_ylabel('回撤')
+        axes[2].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.show()
+def main():
+    """
+    短期策略模型主程序 - 支持分层目录结构
+    """
+    print("="*60)
+    print("股票短期策略模型 - 分层目录版本")
+    print("="*60)
+
+    # 1. 加载数据
+    data_path = r"E:\\day"  # 修改为你的实际路径
+
+    print(f"数据路径: {data_path}")
+
+    data_loader = StockDataLoader(data_path)
+    stock_data = data_loader.load_all_stocks()
+
+    if not stock_data:
+        print("没有找到股票数据！")
+        print("请检查:")
+        print(f"  1. 路径是否正确: {data_path}")
+        print(f"  2. 该路径下是否有子文件夹")
+        print(f"  3. 子文件夹中是否有CSV文件")
+        return None
+
+    # 统计文件夹分布
+    data_loader.get_stock_count_by_folder()
+
+    # 2. 特征工程
+    print("\\n" + "="*60)
+    print("开始特征工程...")
+    feature_engineer = ShortTermFeatureEngineer()
+    all_features = feature_engineer.prepare_features(stock_data)
+
+    if not all_features:
+        print("特征工程失败！")
+        return None
+
+    # 3. 建模
+    print("\\n" + "="*60)
+    print("开始构建短期策略模型...")
+    strategy_model = ShortTermStrategyModel(lookback_days=60, future_days=3)
+    model_data = strategy_model.prepare_model_data(all_features)
+
+    if not model_data:
+        print("模型数据准备失败！")
+        return None
+
+    trained_models = strategy_model.train_models(model_data)
+
+    if not trained_models:
+        print("模型训练失败！")
+        return None
+
+    # 生成信号 - 需要传入stock_data以获取实际日期
+    signals = strategy_model.generate_signals(model_data, stock_data)
+
+    if not signals:
+        print("信号生成失败！")
+        return None
+
+
+    # 4. 回测
+    print("\\\\n" + "="*60)
+    print("开始回测...")
+    backtester = ShortTermBacktester(initial_capital=10000000)  # 使用更新后的类
+    backtest_results = backtester.run_backtest(signals, stock_data)
+    
+    # 5. 可视化
+    if backtest_results:
+        print("\\\\n" + "="*60)
+        print("生成可视化结果...")
+        visualizer = StrategyVisualizer()
+        visualizer.plot_strategy_performance(backtest_results, top_n=5)
+        
+        # 显示部分股票详细分析
+        if backtest_results:
+            # 显示前3只股票的详细分析
+            stock_codes = list(backtest_results.keys())[:3]
+            for stock_code in stock_codes:
+                visualizer.plot_single_stock_analysis(stock_code, 
+                                                     backtest_results[stock_code], 
+                                                     stock_data)
+    else:
+        print("回测结果为空，跳过可视化")
+    
+    print("\\\\n" + "="*60)
+    print("短期策略模型运行完成！")
+    print("="*60)
+    
+    return {
+        'stock_data': stock_data,
+        'features': all_features,
+        'models': trained_models,
+        'signals': signals,
+        'backtest_results': backtest_results
+    }
+# 运行主程序
+if __name__ == "__main__":
+    results = main()
+
